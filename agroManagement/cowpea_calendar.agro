@@ -1,0 +1,13 @@
+Version: 1.0
+AgroManagement:
+- 2023-01-01:
+    CropCalendar:
+        crop_name: 'cowpea'
+        variety_name: 'Cowpea_VanHeemst_1988'
+        crop_start_date: 2023-05-20
+        crop_start_type: sowing      
+        crop_end_date: 2023-08-30
+        crop_end_type: harvest       
+        max_duration: 110            
+    TimedEvents: null
+    StateEvents: null

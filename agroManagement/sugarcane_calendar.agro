@@ -1,0 +1,13 @@
+Version: 1.0
+AgroManagement:
+- 2023-01-01:
+    CropCalendar:
+        crop_name: 'sugarcane'
+        variety_name: 'Sugarcane_VanHeemst_1988'
+        crop_start_date: 2023-03-15
+        crop_start_type: sowing      
+        crop_end_date: 2024-03-15
+        crop_end_type: harvest       
+        max_duration: 370            
+    TimedEvents: null
+    StateEvents: null

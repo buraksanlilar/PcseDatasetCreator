@@ -1,0 +1,13 @@
+Version: 1.0
+AgroManagement:
+- 2023-01-01:
+    CropCalendar:
+        crop_name: 'rapeseed'
+        variety_name: 'Oilseed_rape_1001'
+        crop_start_date: 2023-10-20
+        crop_start_type: sowing      
+        crop_end_date: 2024-05-30
+        crop_end_type: harvest       
+        max_duration: 240            
+    TimedEvents: null
+    StateEvents: null

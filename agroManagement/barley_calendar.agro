@@ -1,0 +1,13 @@
+Version: 1.0
+AgroManagement:
+- 2023-01-01:
+    CropCalendar:
+        crop_name: 'barley'
+        variety_name: 'Spring_barley_301'
+        crop_start_date: 2023-03-15  
+        crop_start_type: sowing      
+        crop_end_date: 2023-08-15    
+        crop_end_type: harvest       
+        max_duration: 200            
+    TimedEvents: null
+    StateEvents: null

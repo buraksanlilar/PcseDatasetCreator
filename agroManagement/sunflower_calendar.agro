@@ -1,0 +1,13 @@
+Version: 1.0
+AgroManagement:
+- 2023-01-01:
+    CropCalendar:
+        crop_name: 'sunflower'
+        variety_name: 'Sunflower_1101'
+        crop_start_date: 2023-04-01
+        crop_start_type: sowing      
+        crop_end_date: 2023-08-15
+        crop_end_type: harvest       
+        max_duration: 140            
+    TimedEvents: null
+    StateEvents: null

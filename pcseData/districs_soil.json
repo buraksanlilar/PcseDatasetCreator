@@ -1,0 +1,92 @@
+[
+  {
+    "district": "Nevşehir, Avanos",
+    "latitude": 38.715,
+    "longitude": 34.845,
+    "soilType": "sr1.new (Fine Sand)"
+  },
+  {
+    "district": "Aksaray, Merkez",
+    "latitude": 38.368,
+    "longitude": 34.032,
+    "soilType": "sr2.new (Loamy Fine Sand)"
+  },
+  {
+    "district": "Antalya, Manavgat",
+    "latitude": 36.785,
+    "longitude": 31.443,
+    "soilType": "sr3.new (Very Loamy Fine Sand)"
+  },
+  {
+    "district": "Sakarya, Karasu",
+    "latitude": 41.102,
+    "longitude": 30.705,
+    "soilType": "sr4.new (Fine Sandy Loam)"
+  },
+  {
+    "district": "Iğdır, Aralık",
+    "latitude": 39.865,
+    "longitude": 44.512,
+    "soilType": "ec1.new (Coarse)"
+  },
+  {
+    "district": "Konya, Karapınar",
+    "latitude": 37.715,
+    "longitude": 33.55,
+    "soilType": "ec2.new (Medium)"
+  },
+  {
+    "district": "Ankara, Polatlı",
+    "latitude": 39.575,
+    "longitude": 32.145,
+    "soilType": "ec3.new (Medium Fine)"
+  },
+  {
+    "district": "Edirne, Uzunköprü",
+    "latitude": 41.27,
+    "longitude": 26.685,
+    "soilType": "ec4.new (Fine - Vertisols)"
+  },
+  {
+    "district": "Adana, Karataş",
+    "latitude": 36.575,
+    "longitude": 35.375,
+    "soilType": "ec5.new (Very Fine - Heavy Clay)"
+  },
+  {
+    "district": "Trabzon, Köprübaşı (Ağaçbaşı)",
+    "latitude": 40.758,
+    "longitude": 40.125,
+    "soilType": "ec6.new (Peat/Organic)"
+  },
+  {
+    "district": "Şanlıurfa, Akçakale",
+    "latitude": 36.711,
+    "longitude": 38.948,
+    "soilType": "spg005.awc (Silt Loam/Clay Loam)"
+  },
+  {
+    "district": "İzmir, Menemen",
+    "latitude": 38.605,
+    "longitude": 27.065,
+    "soilType": "soil_5.sol (Loam - Alluvial)"
+  },
+  {
+    "district": "Bursa, Karacabey",
+    "latitude": 40.215,
+    "longitude": 28.355,
+    "soilType": "m03.awc (Medium Fine)"
+  },
+  {
+    "district": "Muş, Merkez",
+    "latitude": 38.745,
+    "longitude": 41.505,
+    "soilType": "m05.awc (Very Fine/Heavy Clay)"
+  },
+  {
+    "district": "Kayseri, Develi (Sultan Sazlığı çevresi)",
+    "latitude": 38.355,
+    "longitude": 35.215,
+    "soilType": "spg007.awc (High Retention Clay/Organic)"
+  }
+]

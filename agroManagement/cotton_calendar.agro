@@ -1,0 +1,13 @@
+Version: 1.0
+AgroManagement:
+- 2023-01-01:
+    CropCalendar:
+        crop_name: 'cotton'
+        variety_name: 'Cotton_VanHeemst_1988'
+        crop_start_date: 2023-05-01
+        crop_start_type: sowing      
+        crop_end_date: 2023-10-15
+        crop_end_type: harvest       
+        max_duration: 180            
+    TimedEvents: null
+    StateEvents: null
