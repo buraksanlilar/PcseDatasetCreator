@@ -1,21 +1,25 @@
 import os
-import json
+import copy
 import random
-
+import sys
 import pandas as pd
+from tqdm import tqdm
 
 from pcse.input import YAMLCropDataProvider, CABOFileReader, YAMLAgroManagementReader, WOFOST72SiteDataProvider, CSVWeatherDataProvider
 from pcse.base import ParameterProvider
 from pcse.models import Wofost72_WLP_CWB
 
+# 1. Klasor yollarini belirle
+base_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(base_dir)
+
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 from openmeteo.daily import fetch_and_save_pcse_weather
 from openmeteo.hourly import fetch_hourly_sensor_data
 from openmeteo.elevation import fetch_batch_elevations
 from openmeteo.wav_provider import get_site_data
-
-# 1. Klasör yollarını belirle
-base_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(base_dir)
 
 crop_dir = os.path.join(parent_dir, "cropTypes")
 soil_dir = os.path.join(parent_dir, "soilTypes")
@@ -23,6 +27,24 @@ openmeteo_dir = os.path.join(parent_dir, "openmeteo")
 daily_weather_dir = os.path.join(openmeteo_dir, "pcse_weather_data")
 hourly_weather_dir = os.path.join(openmeteo_dir, "hourly_weather_data")
 
+dataset_output_dir = os.path.join(parent_dir, "dataset_output")
+yearly_output_dir = os.path.join(dataset_output_dir, "yearly")
+os.makedirs(yearly_output_dir, exist_ok=True)
+
+progress_file = os.path.join(dataset_output_dir, "progress_multiyear.csv")
+errors_file = os.path.join(dataset_output_dir, "errors_multiyear.csv")
+
+# Bitki verilerini yukle
+cropd = YAMLCropDataProvider(fpath=crop_dir, force_reload=True)
+all_crops_varieties = cropd.get_crops_varieties()
+
+available_agro_files = {
+    f: os.path.join(parent_dir, "agroManagement", f)
+    for f in os.listdir(os.path.join(parent_dir, "agroManagement"))
+    if f.endswith(".agro")
+}
+
+# --- Coordinate based locations (replace district dependency) ---
 LOCATION_MODE = "grid"
 GRID_LAT_MIN = 36.0
 GRID_LAT_MAX = 42.0
@@ -37,60 +59,6 @@ soil_files = [
     f for f in os.listdir(soil_dir)
     if not f.startswith(".") and f.endswith((".new", ".sol", ".awc"))
 ]
-
-# Bitki verilerini yükle
-cropd = YAMLCropDataProvider(fpath=crop_dir, force_reload=True)
-all_crops_varieties = cropd.get_crops_varieties()
-
-available_agro_files = {
-    f: os.path.join(parent_dir, "agroManagement", f)
-    for f in os.listdir(os.path.join(parent_dir, "agroManagement"))
-    if f.endswith(".agro")
-}
-
-
-def normalize_name(value):
-    return value.replace("_", "").replace("-", "").lower()
-
-
-def find_agro_file_for_crop(crop_name):
-    expected_name = f"{crop_name}_calendar.agro"
-    if expected_name in available_agro_files:
-        return available_agro_files[expected_name]
-
-    normalized_crop = normalize_name(crop_name)
-    for agro_filename, agro_path in available_agro_files.items():
-        agro_base = agro_filename.replace("_calendar.agro", "")
-        if normalize_name(agro_base) == normalized_crop:
-            return agro_path
-    return None
-
-
-def choose_valid_variety(crop_name, varieties):
-    # Bazı dosyalarda provider listesi içinde aktif edilemeyen değerler bulunabiliyor.
-    # Bu nedenle sırayla deneyip gerçekten set_active_crop kabul eden variety seçiliyor.
-    for variety_name in sorted(list(varieties)):
-        try:
-            cropd.set_active_crop(crop_name, variety_name)
-            return variety_name
-        except Exception:
-            continue
-    return None
-
-
-def patch_agromanagement_for_crop(agromanagement, crop_name, variety_name):
-    for campaign in agromanagement:
-        campaign_start = next(iter(campaign.keys()))
-        campaign_data = campaign[campaign_start]
-        crop_calendar = campaign_data.get("CropCalendar")
-        if crop_calendar is not None:
-            crop_calendar["crop_name"] = crop_name
-            crop_calendar["variety_name"] = variety_name
-
-
-def clean_site_config(cfg):
-    valid_keys = ["WAV", "SMLIM", "SSI", "SSMAX", "IFUNRN", "NOTINF"]
-    return {k: v for k, v in cfg.items() if k in valid_keys}
 
 
 def build_grid_coordinates():
@@ -120,7 +88,12 @@ def build_random_coordinates():
     ]
 
 
-def build_locations():
+def clean_site_config(cfg):
+    valid_keys = ["WAV", "SMLIM", "SSI", "SSMAX", "IFUNRN", "NOTINF"]
+    return {k: v for k, v in cfg.items() if k in valid_keys}
+
+
+def build_locations(reference_date=None):
     if LOCATION_MODE == "random":
         coordinates = build_random_coordinates()
     else:
@@ -135,7 +108,11 @@ def build_locations():
     locations = []
     for index, coordinate in enumerate(coordinates):
         soil_file = soil_files[index % len(soil_files)]
-        site_cfg = get_site_data(coordinate["latitude"], coordinate["longitude"])
+        site_cfg = get_site_data(
+            coordinate["latitude"],
+            coordinate["longitude"],
+            reference_date=reference_date,
+        )
 
         combined = {
             "location_id": f"loc_{index + 1:04d}",
@@ -153,13 +130,94 @@ def build_locations():
 
     return locations
 
-
 site_columns = ["WAV", "SMLIM", "SSI", "SSMAX", "IFUNRN", "NOTINF"]
+
+# ---------------------------------------------------------------
+
+
+def normalize_name(value):
+    return value.replace("_", "").replace("-", "").lower()
+
+
+def find_agro_file_for_crop(crop_name):
+    expected_name = f"{crop_name}_calendar.agro"
+    if expected_name in available_agro_files:
+        return available_agro_files[expected_name]
+
+    normalized_crop = normalize_name(crop_name)
+    for agro_filename, agro_path in available_agro_files.items():
+        agro_base = agro_filename.replace("_calendar.agro", "")
+        if normalize_name(agro_base) == normalized_crop:
+            return agro_path
+    return None
+
+
+def choose_valid_variety(crop_name, varieties):
+    # Bazi dosyalarda provider listesi icinde aktif edilemeyen degerler bulunabiliyor.
+    # Bu nedenle sirayla deneyip gercekten set_active_crop kabul eden variety seciliyor.
+    for variety_name in sorted(list(varieties)):
+        try:
+            cropd.set_active_crop(crop_name, variety_name)
+            return variety_name
+        except Exception:
+            continue
+    return None
+
+
+def _shift_date_to_year(date_value, year):
+    dt = pd.to_datetime(date_value)
+    return dt.replace(year=year)
+
+
+def patch_agromanagement_for_year(agromanagement, crop_name, variety_name, year):
+    updated = []
+    for campaign in agromanagement:
+        campaign_start = next(iter(campaign.keys()))
+        campaign_data = copy.deepcopy(campaign[campaign_start])
+
+        new_campaign_start = _shift_date_to_year(campaign_start, year).date()
+
+        if "CropCalendar" in campaign_data and campaign_data["CropCalendar"] is not None:
+            crop_calendar = campaign_data["CropCalendar"]
+            crop_calendar["crop_name"] = crop_name
+            crop_calendar["variety_name"] = variety_name
+
+            for date_key in ["crop_start_date", "crop_end_date"]:
+                if crop_calendar.get(date_key):
+                    crop_calendar[date_key] = _shift_date_to_year(crop_calendar[date_key], year).date()
+
+        if "TimedEvents" in campaign_data and campaign_data["TimedEvents"]:
+            timed_events = campaign_data["TimedEvents"]
+            if isinstance(timed_events, list):
+                for event in timed_events:
+                    if not isinstance(event, dict):
+                        continue
+                    event_name = next(iter(event.keys()))
+                    event_block = event[event_name]
+                    events_table = event_block.get("events_table")
+                    if isinstance(events_table, list):
+                        new_table = []
+                        for item in events_table:
+                            if isinstance(item, dict):
+                                old_date = next(iter(item.keys()))
+                                val = item[old_date]
+                                new_date = _shift_date_to_year(old_date, year).date()
+                                new_table.append({new_date: val})
+                            else:
+                                new_table.append(item)
+                        event_block["events_table"] = new_table
+
+        updated.append({new_campaign_start: campaign_data})
+
+    return updated
+
+
+# Site parametreleri
+custom_site = {"WAV": 100, "SMLIM": 0.36, "SSI": 0}
+sited = WOFOST72SiteDataProvider(**custom_site)
 
 
 if __name__ == "__main__":
-    locations = build_locations()
-    all_merged_data = []
     years = list(range(2014, 2025))
 
     # Sadece secilebilir variety olan crop'lari once filtreleyelim
@@ -176,26 +234,19 @@ if __name__ == "__main__":
 
         valid_crop_variety_pairs.append((crop_name, variety_name))
 
+    locations = build_locations()
     total_combinations = len(years) * len(valid_crop_variety_pairs) * len(locations)
     estimated_minutes = max(1, total_combinations // 12)
 
     print(f"Toplam kombinasyon sayisi: {total_combinations}")
     print(f"Tahmini sure: yaklasik {estimated_minutes} dakika")
 
+    all_yearly_paths = []
     progress_records = []
     error_records = []
     processed_counter = 0
-    yearly_output_dir = os.path.join(parent_dir, "dataset_output", "yearly")
-    os.makedirs(yearly_output_dir, exist_ok=True)
-    dataset_output_dir = os.path.join(parent_dir, "dataset_output")
-    progress_file = os.path.join(dataset_output_dir, "progress_multiyear.csv")
-    errors_file = os.path.join(dataset_output_dir, "errors_multiyear.csv")
-
-    from tqdm import tqdm
 
     with tqdm(total=total_combinations, desc="Multiyear PCSE", unit="komb") as pbar:
-        all_yearly_paths = []
-
         for year in years:
             start_date = f"{year}-01-01"
             end_date = f"{year}-12-31"
@@ -234,8 +285,7 @@ if __name__ == "__main__":
                     continue
 
                 agromanagement_raw = YAMLAgroManagementReader(agro_file_path)
-                agromanagement = [camp for camp in agromanagement_raw]
-                patch_agromanagement_for_crop(agromanagement, crop_name, variety_name)
+                agromanagement = patch_agromanagement_for_year(agromanagement_raw, crop_name, variety_name, year)
 
                 for location in locations:
                     location_id = location["location_id"]
@@ -373,7 +423,7 @@ if __name__ == "__main__":
 
                     df_pcse["day"] = pd.to_datetime(df_pcse["day"])
 
-                    # 3. Saatlik Veri Birleştirme
+                    # 3. Saatlik Veri Birlestirme
                     df_hourly = pd.read_csv(hourly_csv_path)
                     time_column = "DATETIME"
 
@@ -463,7 +513,7 @@ if __name__ == "__main__":
     if all_yearly_paths:
         frames = [pd.read_csv(path) for path in all_yearly_paths]
         final_dataset = pd.concat(frames, ignore_index=True)
-        final_output_file = os.path.join(dataset_output_dir, "final_hourly_pcse_dataset_all_crops.csv")
+        final_output_file = os.path.join(dataset_output_dir, "final_hourly_pcse_dataset_multiyear.csv")
         final_dataset.to_csv(final_output_file, index=False)
         print(f"\nIslem tamamlandi. '{final_output_file}' olusturuldu.")
     else:
