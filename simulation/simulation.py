@@ -11,7 +11,7 @@ from pcse.input import YAMLCropDataProvider, CABOFileReader, YAMLAgroManagementR
 from pcse.base import ParameterProvider
 from pcse.models import Wofost72_WLP_CWB
 
-# 1. Klasor yollarini belirle
+# 1. Define folder paths
 base_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(base_dir)
 
@@ -37,7 +37,7 @@ os.makedirs(yearly_output_dir, exist_ok=True)
 progress_file = os.path.join(dataset_output_dir, "progress_multiyear.csv")
 errors_file = os.path.join(dataset_output_dir, "errors_multiyear.csv")
 
-# Bitki verilerini yukle
+# Load crop data
 cropd = YAMLCropDataProvider(fpath=crop_dir, force_reload=True)
 all_crops_varieties = cropd.get_crops_varieties()
 
@@ -85,7 +85,7 @@ def build_grid_coordinates():
     ]
     skipped = len(latitudes) * len(longitudes) - len(coords)
     if skipped:
-        print(f"  [Kara maskesi] {skipped} deniz/göl noktası atlandı, {len(coords)} kara noktası kaldı.")
+        print(f"  [Land mask] {skipped} sea/lake points skipped, {len(coords)} land points remaining.")
     return coords
 
 
@@ -101,8 +101,8 @@ def build_random_coordinates():
         if is_land(lat, lon):
             coords.append({"latitude": lat, "longitude": lon})
     if len(coords) < RANDOM_LOCATION_COUNT:
-        print(f"  [Kara maskesi] Uyarı: {RANDOM_LOCATION_COUNT} kara noktası isteğine karşı "
-              f"yalnızca {len(coords)} bulunabildi ({max_attempts} denemede).")
+        print(f"  [Land mask] Warning: only {len(coords)} land points found out of "
+              f"{RANDOM_LOCATION_COUNT} requested ({max_attempts} attempts).")
     return coords
 
 
@@ -113,7 +113,7 @@ def build_locations():
         coordinates = build_grid_coordinates()
 
     if not coordinates:
-        raise RuntimeError("Koordinat listesi olusturulamadi.")
+        raise RuntimeError("Could not build coordinate list.")
 
     soil_files_data = load_soil_files(soil_dir)
 
@@ -142,10 +142,10 @@ _tmp_files: list[str] = []
 
 
 def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
-    """Tek yıl veya iki yılı birleştiren CSVWeatherDataProvider döndürür.
+    """Returns a CSVWeatherDataProvider merging one or two years of data.
 
-    Kışlık bitkiler (buğday, arpa vb.) sim_year içinde ekilip crop_end_year
-    içinde hasat edilir. WOFOST her iki yılın hava verisine ihtiyaç duyar.
+    Winter crops (wheat, barley, etc.) are sown in sim_year and harvested in
+    crop_end_year. WOFOST needs weather data from both years.
     """
     y1_csv = os.path.join(daily_weather_dir, str(sim_year), f"{location_id}.csv")
 
@@ -154,9 +154,9 @@ def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
 
     y2_csv = os.path.join(daily_weather_dir, str(crop_end_year), f"{location_id}.csv")
     if not os.path.exists(y2_csv):
-        raise FileNotFoundError(f"Sonraki yıl hava verisi yok: {y2_csv}")
+        raise FileNotFoundError(f"Next-year weather data not found: {y2_csv}")
 
-    # Başlık satırlarını 1. yıldan al, veri satırlarını her iki yıldan birleştir
+    # Take header rows from year 1, merge data rows from both years
     header, data_rows = [], []
     for csv_path in (y1_csv, y2_csv):
         is_first = csv_path == y1_csv
@@ -167,9 +167,9 @@ def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
                     if line.startswith("DAY,"):
                         past_header = True
                         if is_first:
-                            header.append(line)   # kolon başlığını ekle
+                            header.append(line)   # add column header
                     elif is_first:
-                        header.append(line)       # site karakteristiklerini ekle
+                        header.append(line)       # add site characteristics
                 else:
                     data_rows.append(line)
 
@@ -181,9 +181,9 @@ def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
     return CSVWeatherDataProvider(tmp.name, dateformat="%Y%m%d", delimiter=",")
 
 WAV_SCENARIOS = {
-    "kuru":   10,    # cm — kuru başlangıç
-    "normal": 50,    # cm — normal başlangıç
-    "islak":  100,   # cm — ıslak başlangıç
+    "dry":    10,    # cm — dry start
+    "normal": 50,    # cm — normal start
+    "wet":    100,   # cm — wet start
 }
 
 # ---------------------------------------------------------------
@@ -207,8 +207,8 @@ def find_agro_file_for_crop(crop_name):
 
 
 def choose_valid_variety(crop_name, varieties):
-    # Bazi dosyalarda provider listesi icinde aktif edilemeyen degerler bulunabiliyor.
-    # Bu nedenle sirayla deneyip gercekten set_active_crop kabul eden variety seciliyor.
+    # Some files contain values in the provider list that cannot be activated.
+    # Therefore, varieties are tried in order and the first one accepted by set_active_crop is selected.
     for variety_name in sorted(list(varieties)):
         try:
             cropd.set_active_crop(crop_name, variety_name)
@@ -242,7 +242,7 @@ def patch_agromanagement_for_year(agromanagement, crop_name, variety_name, year)
             if crop_calendar.get("crop_end_date"):
                 end = _shift_date_to_year(crop_calendar["crop_end_date"], year).date()
                 start = crop_calendar["crop_start_date"]
-                # Kışlık bitkiler (buğday, arpa vb.) yıl geçişi yapar: hasat ertesi yıla taşınır
+                # Winter crops (wheat, barley, etc.) cross the year boundary: harvest moves to next year
                 if start and end <= start:
                     end = _shift_date_to_year(crop_calendar["crop_end_date"], year + 1).date()
                 crop_calendar["crop_end_date"] = end
@@ -276,16 +276,16 @@ def patch_agromanagement_for_year(agromanagement, crop_name, variety_name, year)
 if __name__ == "__main__":
     years = list(range(2014, 2025))
 
-    # Sadece secilebilir variety olan crop'lari once filtreleyelim
+    # Filter crops that have at least one selectable variety
     valid_crop_variety_pairs = []
     for crop_name, varieties in all_crops_varieties.items():
         if not list(varieties):
-            print(f"Uyari: {crop_name} icin variety bulunamadi, atlaniyor.")
+            print(f"Warning: no variety found for {crop_name}, skipping.")
             continue
 
         variety_name = choose_valid_variety(crop_name, varieties)
         if variety_name is None:
-            print(f"Uyari: {crop_name} icin kullanilabilir variety bulunamadi, atlaniyor.")
+            print(f"Warning: no usable variety found for {crop_name}, skipping.")
             continue
 
         valid_crop_variety_pairs.append((crop_name, variety_name))
@@ -294,9 +294,9 @@ if __name__ == "__main__":
     total_combinations = len(years) * len(valid_crop_variety_pairs) * len(locations) * len(WAV_SCENARIOS)
     estimated_minutes = max(1, total_combinations // 12)
 
-    print(f"Toplam kombinasyon sayisi: {total_combinations}  "
-          f"({len(WAV_SCENARIOS)} WAV senaryosu: {list(WAV_SCENARIOS.keys())})")
-    print(f"Tahmini sure: yaklasik {estimated_minutes} dakika")
+    print(f"Total combinations: {total_combinations}  "
+          f"({len(WAV_SCENARIOS)} WAV scenarios: {list(WAV_SCENARIOS.keys())})")
+    print(f"Estimated time: approximately {estimated_minutes} minutes")
 
     all_yearly_paths = []
     progress_records = []
@@ -308,7 +308,7 @@ if __name__ == "__main__":
             start_date = f"{year}-01-01"
             end_date = f"{year}-12-31"
 
-            # 2. O yilin hava verisini uret (cache mantigi daily/hourly icinde)
+            # 2. Fetch weather data for that year (caching handled inside daily/hourly)
             fetch_and_save_pcse_weather(locations, start_date, end_date)
             fetch_hourly_sensor_data(locations, start_date, end_date)
 
@@ -317,7 +317,7 @@ if __name__ == "__main__":
             for crop_name, variety_name in valid_crop_variety_pairs:
                 agro_file_path = find_agro_file_for_crop(crop_name)
                 if agro_file_path is None:
-                    print(f"Uyari: {crop_name} icin agro dosyasi bulunamadi, atlaniyor.")
+                    print(f"Warning: agro file not found for {crop_name}, skipping.")
                     for location in locations:
                         processed_counter += 1
                         pbar.update(1)
@@ -344,7 +344,7 @@ if __name__ == "__main__":
                 agromanagement_raw = YAMLAgroManagementReader(agro_file_path)
                 agromanagement = patch_agromanagement_for_year(agromanagement_raw, crop_name, variety_name, year)
 
-                # Kışlık bitkilerde hasat ertesi yıla taşınabilir — o yılın hava verisini önceden çek
+                # For winter crops the harvest may move to the next year — fetch that year's weather in advance
                 try:
                     last_camp = agromanagement[-1]
                     cc = last_camp[next(iter(last_camp))].get("CropCalendar") or {}
@@ -367,7 +367,7 @@ if __name__ == "__main__":
                     hourly_csv_path = os.path.join(hourly_weather_dir, str(year), f"{location_id}_hourly.csv")
                     daily_csv_path = os.path.join(daily_weather_dir, str(year), f"{location_id}.csv")
 
-                    # Eksik dosya kontrolü — WAV döngüsünden önce yap
+                    # Check for missing files — do this before the WAV loop
                     if not all(os.path.exists(p) for p in [soil_path, daily_csv_path, hourly_csv_path]):
                         for _ in WAV_SCENARIOS:
                             processed_counter += 1
@@ -383,7 +383,7 @@ if __name__ == "__main__":
                             pd.DataFrame(error_records).to_csv(errors_file, index=False)
                         continue
 
-                    # Toprak ve hava verisi — lokasyon başına bir kez yükle
+                    # Soil and weather data — load once per location
                     soild = CABOFileReader(soil_path)
                     if "RDMSOL" not in soild:
                         soild["RDMSOL"] = 150.0
@@ -425,7 +425,7 @@ if __name__ == "__main__":
                     df_hourly[time_column] = pd.to_datetime(df_hourly[time_column]).dt.tz_localize(None)
                     df_hourly["_merge_key"] = df_hourly[time_column].dt.normalize()
 
-                    # WAV senaryoları — toprak/hava verisi paylaşılır, sadece site değişir
+                    # WAV scenarios — soil/weather data is shared, only the site changes
                     for wav_scenario, wav_fraction in WAV_SCENARIOS.items():
                         processed_counter += 1
                         status = "ok"
@@ -468,7 +468,7 @@ if __name__ == "__main__":
                                 pd.DataFrame(error_records).to_csv(errors_file, index=False)
                             continue
 
-                        # Hasat verimi: WOFOST çıktısından son TWSO değeri (kışlık bitkiler dahil)
+                        # Harvest yield: last TWSO value from WOFOST output (including winter crops)
                         twso_series = df_pcse["TWSO"].dropna() if "TWSO" in df_pcse.columns else pd.Series([], dtype=float)
                         harvest_twso = float(twso_series.iloc[-1]) if not twso_series.empty else 0.0
 
@@ -485,9 +485,9 @@ if __name__ == "__main__":
                         merged_df["variety_name"] = variety_name
                         merged_df["year"]         = year
                         merged_df["season_id"]    = f"{location_id}_{crop_name}_{variety_name}_{year}_{wav_scenario}"
-                        merged_df["harvest_twso"] = harvest_twso        # sezon boyunca sabit hasat verimi
+                        merged_df["harvest_twso"] = harvest_twso        # constant harvest yield across the season
                         merged_df["sim_success"]  = int(harvest_twso > 0)
-                        merged_df["TWSO"]         = merged_df["TWSO"].fillna(0)  # günlük büyüme durumu
+                        merged_df["TWSO"]         = merged_df["TWSO"].fillna(0)  # daily growth state
 
                         all_merged_data.append(merged_df)
                         progress_records.append({
@@ -503,33 +503,33 @@ if __name__ == "__main__":
                             pd.DataFrame(progress_records).to_csv(progress_file, index=False)
                             pd.DataFrame(error_records).to_csv(errors_file, index=False)
 
-            # 4. Yillik kayit
+            # 4. Yearly save
             if all_merged_data:
                 yearly_dataset = pd.concat(all_merged_data, ignore_index=True)
                 yearly_file = os.path.join(yearly_output_dir, f"pcse_{year}.csv")
                 yearly_dataset.to_csv(yearly_file, index=False)
                 all_yearly_paths.append(yearly_file)
-                print(f"Yillik dataset olusturuldu: {yearly_file}")
+                print(f"Yearly dataset created: {yearly_file}")
             else:
-                print(f"Uyari: {year} icin birlestirilecek veri yok.")
+                print(f"Warning: no data to merge for {year}.")
 
-    # Son progress/error kayitlari
+    # Final progress/error save
     pd.DataFrame(progress_records).to_csv(progress_file, index=False)
     pd.DataFrame(error_records).to_csv(errors_file, index=False)
 
-    # Temp hava dosyalarini temizle
+    # Clean up temp weather files
     for tmp_path in _tmp_files:
         try:
             os.unlink(tmp_path)
         except Exception:
             pass
 
-    # 5. Final cok yilli kayit
+    # 5. Final multi-year save
     if all_yearly_paths:
         frames = [pd.read_csv(path) for path in all_yearly_paths]
         final_dataset = pd.concat(frames, ignore_index=True)
         final_output_file = os.path.join(dataset_output_dir, "final_hourly_pcse_dataset_multiyear.csv")
         final_dataset.to_csv(final_output_file, index=False)
-        print(f"\nIslem tamamlandi. '{final_output_file}' olusturuldu.")
+        print(f"\nProcessing complete. '{final_output_file}' created.")
     else:
-        print("\nHicbir yilda veri birlestirilemedi.")
+        print("\nNo data could be merged for any year.")

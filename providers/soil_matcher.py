@@ -1,14 +1,14 @@
 """
 SoilGrids → WOFOST Soil File Matcher
 =====================================
-Verilen koordinatlar için SoilGrids API'den toprak verisi çeker (sand/silt/clay),
-texture class belirler ve soilType klasöründeki WOFOST dosyalarıyla eşleştirir.
+Fetches soil data (sand/silt/clay) from the SoilGrids API for given coordinates,
+determines the texture class, and matches against WOFOST files in the soilType directory.
 
-Kullanım:
+Usage:
     python soil_matcher.py
 
-Çıktı:
-    - Konsola özet tablo
+Output:
+    - Summary table to console
     - soil_match_results.json
 """
 
@@ -40,24 +40,24 @@ except Exception:
     except Exception:
         openlandmap = None
 
-# ─── Yapılandırma ─────────────────────────────────────────────────────────────
+# ─── Configuration ────────────────────────────────────────────────────────────
 
 SOILGRIDS_URL  = "https://rest.isric.org/soilgrids/v2.0/properties/query"
 SOIL_FILES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soils")
 OUTPUT_JSON    = os.path.join(os.path.dirname(os.path.abspath(__file__)), "soil_match_results.json")
 
-# SoilGrids fair-use: ~5 istek/dakika → cache miss'te 13sn bekle
+# SoilGrids fair-use: ~5 requests/minute → wait 13s on cache miss
 API_SLEEP_SECONDS = 13
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 1. WOFOST dosya okuma
+# 1. WOFOST file reading
 # ══════════════════════════════════════════════════════════════════════════════
 
 def parse_wofost_soil_file(filepath: str) -> dict:
     """
-    .new / .awc / .sol formatındaki WOFOST dosyasını okur.
-    Döndürür: dict — SOLNAM, SMW, SMFCF, SM0, CRAIRC, K0, SOPE, KSUB, AWC
+    Reads a WOFOST file in .new / .awc / .sol format.
+    Returns: dict — SOLNAM, SMW, SMFCF, SM0, CRAIRC, K0, SOPE, KSUB, AWC
     """
     result = {
         "filepath": filepath,
@@ -67,7 +67,7 @@ def parse_wofost_soil_file(filepath: str) -> dict:
     with open(filepath, encoding="utf-8", errors="replace") as fh:
         content = fh.read()
 
-    # Yorum satırlarını ve ** başlıklarını temizle
+    # Strip comment lines and ** headers
     clean_lines = []
     for line in content.splitlines():
         if "!" in line:
@@ -77,18 +77,18 @@ def parse_wofost_soil_file(filepath: str) -> dict:
             clean_lines.append(line)
     clean = "\n".join(clean_lines)
 
-    # Skalar parametreler
+    # Scalar parameters
     for key in ("SMW", "SMFCF", "SM0", "CRAIRC", "K0", "SOPE", "KSUB",
                 "SPADS", "SPODS", "SPASS", "SPOSS", "DEFLIM"):
         m = re.search(rf"\b{key}\s*=\s*([-\d.]+)", clean)
         if m:
             result[key] = float(m.group(1))
 
-    # SOLNAM (orijinal içerikten, tırnaklar dahil)
+    # SOLNAM (from original content, including quotes)
     m = re.search(r"SOLNAM\s*=\s*'([^']+)'", content)
     result["SOLNAM"] = m.group(1).strip() if m else result["filename"]
 
-    # AWC = field capacity − wilting point
+    # AWC = field capacity - wilting point
     smw   = result.get("SMW")
     smfcf = result.get("SMFCF")
     if smw is not None and smfcf is not None:
@@ -98,9 +98,9 @@ def parse_wofost_soil_file(filepath: str) -> dict:
 
 
 def load_soil_files(directory: str) -> list[dict]:
-    """soilType klasöründeki tüm .new / .awc / .sol dosyalarını yükler."""
+    """Loads all .new / .awc / .sol files from the soilType directory."""
     if not os.path.isdir(directory):
-        raise FileNotFoundError(f"soilType klasörü bulunamadı: {directory}")
+        raise FileNotFoundError(f"soilType directory not found: {directory}")
 
     soils = []
     for fname in sorted(os.listdir(directory)):
@@ -109,10 +109,10 @@ def load_soil_files(directory: str) -> list[dict]:
             try:
                 soils.append(parse_wofost_soil_file(path))
             except Exception as exc:
-                print(f"  [UYARI] {fname} okunamadı: {exc}")
+                print(f"  [WARNING] {fname} could not be read: {exc}")
 
     if not soils:
-        raise RuntimeError(f"soilType klasöründe hiç dosya bulunamadı: {directory}")
+        raise RuntimeError(f"No files found in soilType directory: {directory}")
 
     return soils
 
@@ -145,12 +145,12 @@ def fetch_soilgrids(lat: float, lon: float, max_attempts: int = 4) -> dict | Non
             r = cache_session.get(SOILGRIDS_URL, params=params, headers={"Accept": "application/json"}, timeout=20)
             if r.status_code == 429:
                 wait = 15 * attempt
-                print(f"    [SoilGrids] Rate limit — {wait}s bekleniyor...")
+                print(f"    [SoilGrids] Rate limit — waiting {wait}s...")
                 time.sleep(wait)
                 continue
             if r.status_code >= 500:
                 wait = 5 * attempt
-                print(f"    [SoilGrids] Server error {r.status_code} — {wait}s bekleniyor...")
+                print(f"    [SoilGrids] Server error {r.status_code} — waiting {wait}s...")
                 if attempt < max_attempts:
                     time.sleep(wait)
                     continue
@@ -159,7 +159,7 @@ def fetch_soilgrids(lat: float, lon: float, max_attempts: int = 4) -> dict | Non
             return r.json()
         except requests.exceptions.Timeout:
             wait = 8 * attempt
-            print(f"    [SoilGrids attempt {attempt}] Timeout — {wait}s bekleniyor...")
+            print(f"    [SoilGrids attempt {attempt}] Timeout — waiting {wait}s...")
             if attempt < max_attempts:
                 time.sleep(wait)
         except Exception as exc:
@@ -179,12 +179,12 @@ def fetch_soilgrids(lat: float, lon: float, max_attempts: int = 4) -> dict | Non
             resp = cache_session.get(OPENLANDMAP_URL, params=params2, headers={"Accept": "application/json"}, timeout=20)
             if resp.status_code == 429:
                 wait = 15 * attempt
-                print(f"    [OpenLandMap] Rate limit — {wait}s bekleniyor...")
+                print(f"    [OpenLandMap] Rate limit — waiting {wait}s...")
                 time.sleep(wait)
                 continue
             if resp.status_code >= 500:
                 wait = 5 * attempt
-                print(f"    [OpenLandMap] Sunucu hatası {resp.status_code} — {wait}s bekleniyor...")
+                print(f"    [OpenLandMap] Server error {resp.status_code} — waiting {wait}s...")
                 if attempt < max_attempts:
                     time.sleep(wait)
                     continue
@@ -197,7 +197,7 @@ def fetch_soilgrids(lat: float, lon: float, max_attempts: int = 4) -> dict | Non
             return resp
         except requests.exceptions.Timeout:
             wait = 8 * attempt
-            print(f"    [OpenLandMap attempt {attempt}] Timeout — {wait}s bekleniyor...")
+            print(f"    [OpenLandMap attempt {attempt}] Timeout — waiting {wait}s...")
             if attempt < max_attempts:
                 time.sleep(wait)
         except Exception as exc:
@@ -241,7 +241,7 @@ def extract_mean(resp, var_name: str) -> float | None:
             if var_name in key and val is not None and val != 0:
                 return float(val)
     except (KeyError, TypeError, IndexError) as exc:
-        print(f"    [UYARI] extract_mean hatası ({var_name}): {exc}")
+        print(f"    [WARNING] extract_mean error ({var_name}): {exc}")
     return None
 
 
@@ -314,28 +314,28 @@ def fetch_openlandmap_texture(lat: float, lon: float) -> dict | None:
     return out
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 3. Texture sınıflandırma (USDA üçgeni)
+# 3. Texture classification (USDA triangle)
 # ══════════════════════════════════════════════════════════════════════════════
 
 def normalize_fractions(sand, silt, clay):
     """
-    g/kg → % dönüşümü.
+    g/kg → % conversion.
 
-    Düzeltme: SoilGrids v2.0 değerleri g/kg cinsinden (10 → 1%).
-    Eşik > 10 olarak güncellendi (> 100 yerine), böylece tüm g/kg
-    değerleri doğru normalize edilir. Toplam'a göre yeniden ölçekleme
-    de eklendi — API'den gelen değerlerin toplamı tam 1000 olmayabilir.
+    Note: SoilGrids v2.0 values are in g/kg (10 → 1%).
+    Threshold updated to > 10 (instead of > 100) so all g/kg values are
+    correctly normalised. Rescaling by total is also applied — the sum of
+    API values may not be exactly 1000.
     """
     if any(v is None for v in (sand, silt, clay)):
         return None, None, None
 
-    # g/kg formatı: değerler % değil, 10 ile çarpılmış
+    # g/kg format: values are multiplied by 10 (not percent)
     if sand > 10:
         sand /= 10.0
         silt /= 10.0
         clay /= 10.0
 
-    # Toplama göre normalize et (API yuvarlama hatalarını düzelt)
+    # Normalize by total (correct API rounding errors)
     total = sand + silt + clay
     if total > 0 and abs(total - 100.0) > 1.0:
         sand = sand / total * 100
@@ -346,7 +346,7 @@ def normalize_fractions(sand, silt, clay):
 
 
 def classify_texture(sand_pct, silt_pct, clay_pct) -> str:
-    """USDA texture üçgeni — tam sınıflandırma."""
+    """USDA texture triangle — full classification."""
     if any(v is None for v in (sand_pct, silt_pct, clay_pct)):
         return "unknown"
 
@@ -372,8 +372,8 @@ def classify_texture(sand_pct, silt_pct, clay_pct) -> str:
     return "loam"
 
 
-# Texture → tipik AWC (cm3/cm3) — eşleşme skoru için referans
-# (Saxton & Rawls 2006 pedotransfer function ortalamaları)
+# Texture → typical AWC (cm3/cm3) — reference for matching score
+# (Saxton & Rawls 2006 pedotransfer function averages)
 TEXTURE_AWC = {
     "sand":             0.08,
     "loamy_sand":       0.12,
@@ -390,30 +390,30 @@ TEXTURE_AWC = {
     "unknown":          0.18,
 }
 
-# Texture → tercih sıralı WOFOST dosya listesi
-# Dosya özellikleri (SMW / SMFCF → AWC):
-#   ec1.new  : AWC=0.070  kaba kum
-#   sr1.new  : AWC=0.118  ince kum
-#   spg002   : AWC=0.088  hafif
-#   spg003   : AWC=0.113  hafif-orta
-#   m01.awc  : AWC=0.150  kaba tekstür
-#   sr2.new  : AWC=0.176  kumlu tın
-#   sr4.new  : AWC=0.171  ince kumlu tın
-#   spg004   : AWC=0.138  orta
-#   ec2.new  : AWC=0.173  orta (tın)
-#   sr3.new  : AWC=0.205  çok tinli ince kum
-#   spg005   : AWC=0.163  orta
-#   soil_5   : AWC=0.163  orta
-#   spg006   : AWC=0.188  orta-ince
-#   m02.awc  : AWC=0.220  orta tekstür
-#   ec3.new  : AWC=0.196  orta-ince
-#   spg007   : AWC=0.213  ince-orta
-#   m03.awc  : AWC=0.250  orta-ince tekstür
-#   m04.awc  : AWC=0.190  ince tekstür
-#   ec4.new  : AWC=0.160  ince (kil)
-#   m05.awc  : AWC=0.130  çok ince tekstür
-#   ec5.new  : AWC=0.084  çok ince (ağır kil)
-#   ec6.new  : AWC=0.392  turba/organik
+# Texture → priority-ordered WOFOST file list
+# File properties (SMW / SMFCF → AWC):
+#   ec1.new  : AWC=0.070  coarse sand
+#   sr1.new  : AWC=0.118  fine sand
+#   spg002   : AWC=0.088  light
+#   spg003   : AWC=0.113  light-medium
+#   m01.awc  : AWC=0.150  coarse texture
+#   sr2.new  : AWC=0.176  sandy loam
+#   sr4.new  : AWC=0.171  fine sandy loam
+#   spg004   : AWC=0.138  medium
+#   ec2.new  : AWC=0.173  medium (loam)
+#   sr3.new  : AWC=0.205  very loamy fine sand
+#   spg005   : AWC=0.163  medium
+#   soil_5   : AWC=0.163  medium
+#   spg006   : AWC=0.188  medium-fine
+#   m02.awc  : AWC=0.220  medium texture
+#   ec3.new  : AWC=0.196  medium-fine
+#   spg007   : AWC=0.213  fine-medium
+#   m03.awc  : AWC=0.250  medium-fine texture
+#   m04.awc  : AWC=0.190  fine texture
+#   ec4.new  : AWC=0.160  fine (clay)
+#   m05.awc  : AWC=0.130  very fine texture
+#   ec5.new  : AWC=0.084  very fine (heavy clay)
+#   ec6.new  : AWC=0.392  peat/organic
 TEXTURE_PRIORITY: dict[str, list[str]] = {
     "sand":             ["ec1.new",  "sr1.new",  "spg002.awc", "m01.awc"],
     "loamy_sand":       ["sr1.new",  "sr2.new",  "ec1.new",    "spg003.awc", "m01.awc"],
@@ -432,18 +432,18 @@ TEXTURE_PRIORITY: dict[str, list[str]] = {
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 4. Eşleme algoritması
+# 4. Matching algorithm
 # ══════════════════════════════════════════════════════════════════════════════
 
 def score_match(soil: dict, texture: str, target_awc: float) -> tuple[float, dict]:
     """
-    Bir WOFOST dosyasının verilen texture/AWC ile uyumunu puanlar.
-    Düşük skor = daha iyi eşleme.
+    Scores how well a WOFOST file matches the given texture/AWC.
+    Lower score = better match.
 
-    Bileşenler:
-        priority_rank : TEXTURE_PRIORITY listesindeki sıra (× 2.0)
-                        listede yoksa len(liste) + 1 (en düşük öncelik)
-        awc_diff      : |AWC_dosya − AWC_hedef| × 10.0
+    Components:
+        priority_rank : position in TEXTURE_PRIORITY list (× 2.0)
+                        if not in list: len(list) + 1 (lowest priority)
+        awc_diff      : |AWC_file − AWC_target| × 10.0
     """
     preferred = TEXTURE_PRIORITY.get(texture, [])
     try:
@@ -455,7 +455,7 @@ def score_match(soil: dict, texture: str, target_awc: float) -> tuple[float, dic
     if file_awc is not None:
         awc_diff = abs(file_awc - target_awc)
     else:
-        awc_diff = 0.10  # SMFCF eksikliği cezası
+        awc_diff = 0.10  # penalty for missing SMFCF
 
     total = priority_rank * 2.0 + awc_diff * 10.0
 
@@ -470,8 +470,8 @@ def score_match(soil: dict, texture: str, target_awc: float) -> tuple[float, dic
 
 def _fetch_soilgrids_simple(lat: float, lon: float) -> tuple[float | None, float | None, float | None]:
     """
-    Tek seferlik, retry'sız SoilGrids isteği — komşu koordinat taraması için.
-    (sand_raw, silt_raw, clay_raw) döndürür; hata/null durumunda (None, None, None).
+    Single, no-retry SoilGrids request — for neighbour coordinate scanning.
+    Returns (sand_raw, silt_raw, clay_raw); (None, None, None) on error/null.
     """
     params = [
         ("lat", float(lat)), ("lon", float(lon)),
@@ -497,9 +497,9 @@ def _fetch_soilgrids_simple(lat: float, lon: float) -> tuple[float | None, float
 
 def _find_neighbor_soil(lat: float, lon: float) -> tuple[float | None, float | None, float | None, tuple | None]:
     """
-    Orijinal koordinat null döndürdüğünde yakın komşuları tarar.
-    Önce ±0.1°, bulunamazsa ±0.2° dener (8 yön, mesafeye göre sıralı).
-    Döndürür: (sand_raw, silt_raw, clay_raw, (nlat, nlon)) veya (None,None,None,None).
+    Scans nearby neighbours when the original coordinate returns null.
+    Tries ±0.1° first, then ±0.2° (8 directions, sorted by distance).
+    Returns: (sand_raw, silt_raw, clay_raw, (nlat, nlon)) or (None,None,None,None).
     """
     for delta in (0.1, 0.2):
         offsets = [
@@ -517,33 +517,33 @@ def _find_neighbor_soil(lat: float, lon: float) -> tuple[float | None, float | N
 
 def match_soil(lat: float, lon: float, soil_files: list[dict]) -> dict:
     """
-    Tek bir koordinat için SoilGrids'ten veri çeker ve en iyi dosyayı bulur.
+    Fetches data from SoilGrids for a single coordinate and finds the best matching file.
     """
     print(f"\n  📍 lat={lat}, lon={lon}")
 
-    # ── 1. Orijinal koordinat ──
+    # ── 1. Original coordinate ──
     resp       = fetch_soilgrids(lat, lon)
     from_cache = getattr(resp, "from_cache", False) if resp else True
 
     sand_raw = extract_mean(resp, "sand")
     silt_raw = extract_mean(resp, "silt")
     clay_raw = extract_mean(resp, "clay")
-    print(f"    [DEBUG] Ham API değerleri → sand={sand_raw}, silt={silt_raw}, clay={clay_raw}")
+    print(f"    [DEBUG] Raw API values → sand={sand_raw}, silt={silt_raw}, clay={clay_raw}")
 
     neighbor_used = None
 
     all_none = (sand_raw is None and silt_raw is None and clay_raw is None)
     if all_none:
-        # ── 2. Komşu koordinat taraması (±0.1° → ±0.2°) ──
+        # ── 2. Neighbour coordinate scan (±0.1° → ±0.2°) ──
         ns, nsi, ncl, neighbor_used = _find_neighbor_soil(lat, lon)
         if neighbor_used:
-            print(f"    [KOMŞU] ({neighbor_used[0]}, {neighbor_used[1]}) koordinatından veri alındı")
+            print(f"    [NEIGHBOUR] Data retrieved from ({neighbor_used[0]}, {neighbor_used[1]})")
             sand_raw, silt_raw, clay_raw = ns, nsi, ncl
         else:
             # ── 3. OpenLandMap STAC COG fallback ──
             olm = fetch_openlandmap_texture(lat, lon)
             if olm:
-                print("    [FALLBACK] OpenLandMap verisi kullanılıyor")
+                print("    [FALLBACK] Using OpenLandMap data")
                 sand_raw = olm.get('sand')
                 silt_raw = olm.get('silt')
                 clay_raw = olm.get('clay')
@@ -553,16 +553,16 @@ def match_soil(lat: float, lon: float, soil_files: list[dict]) -> dict:
     target_awc       = TEXTURE_AWC.get(texture, 0.18)
 
     if resp is None:
-        print("    [UYARI] SoilGrids yanıt vermedi. Texture='unknown', AWC=0.18")
+        print("    [WARNING] SoilGrids did not respond. Texture='unknown', AWC=0.18")
     else:
         s  = sand  or 0
         si = silt  or 0
         cl = clay  or 0
         print(f"    SoilGrids → sand={s:.1f}%  silt={si:.1f}%  clay={cl:.1f}%")
-        print(f"    Texture: {texture}  |  Hedef AWC: {target_awc:.3f} cm³/cm³"
+        print(f"    Texture: {texture}  |  Target AWC: {target_awc:.3f} cm³/cm³"
               + ("  [cache]" if from_cache else "  [API]"))
 
-    # ── Puanlama ──
+    # ── Scoring ──
     scored = sorted(
         [(score_match(sf, texture, target_awc), sf) for sf in soil_files],
         key=lambda x: x[0][0],
@@ -571,9 +571,9 @@ def match_soil(lat: float, lon: float, soil_files: list[dict]) -> dict:
     (best_score, best_details), best = scored[0]
 
     in_list = best_details.get("in_priority_list", False)
-    rank_str = f"öncelik#{best_details.get('priority_rank', '?')}" if in_list else "liste dışı"
-    print(f"    ✅ En iyi: {best['filename']}  |  SOLNAM: {best.get('SOLNAM','?')}"
-          f"  |  {rank_str}  |  skor={best_score:.4f}")
+    rank_str = f"priority#{best_details.get('priority_rank', '?')}" if in_list else "not in list"
+    print(f"    ✅ Best: {best['filename']}  |  SOLNAM: {best.get('SOLNAM','?')}"
+          f"  |  {rank_str}  |  score={best_score:.4f}")
 
     return {
         "sg_sand_pct":    round(sand, 2)  if sand  is not None else None,
@@ -608,23 +608,23 @@ def match_soil(lat: float, lon: float, soil_files: list[dict]) -> dict:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 5. Toplu işleme
+# 5. Batch processing
 # ══════════════════════════════════════════════════════════════════════════════
 
 def batch_match(locations: list[dict]) -> list[dict]:
     """
-    Birden fazla koordinat için toplu eşleme.
+    Batch matching for multiple coordinates.
 
-    locations formatı:
-        [{"name": "İzmir", "lat": 38.43, "lon": 27.41}, ...]
+    locations format:
+        [{"name": "Izmir", "lat": 38.43, "lon": 27.41}, ...]
     """
-    # ── Dosyaları yükle ──
-    print(f"📂 Soil dosyaları yükleniyor: {SOIL_FILES_DIR}")
+    # ── Load files ──
+    print(f"📂 Loading soil files: {SOIL_FILES_DIR}")
     soil_files = load_soil_files(SOIL_FILES_DIR)
-    print(f"   {len(soil_files)} dosya yüklendi:\n")
+    print(f"   {len(soil_files)} files loaded:\n")
 
     col = "{:<25} {:<40} {:>6} {:>7} {:>6}"
-    print(col.format("Dosya", "SOLNAM", "SMW", "SMFCF", "AWC"))
+    print(col.format("File", "SOLNAM", "SMW", "SMFCF", "AWC"))
     print("─" * 90)
     for sf in soil_files:
         print(col.format(
@@ -635,20 +635,20 @@ def batch_match(locations: list[dict]) -> list[dict]:
             str(sf.get("AWC",   "?")),
         ))
 
-    # ── Eşleştir ──
+    # ── Match ──
     results = []
     total   = len(locations)
 
     for i, loc in enumerate(locations, 1):
         lat  = loc.get("lat") or loc.get("latitude")
         lon  = loc.get("lon") or loc.get("longitude")
-        name = loc.get("name", f"lokasyon_{i}")
+        name = loc.get("name", f"location_{i}")
 
         print(f"\n{'═'*60}")
         print(f"[{i}/{total}] {name}")
 
         if lat is None or lon is None:
-            print("  [HATA] Koordinat eksik, atlandı.")
+            print("  [ERROR] Coordinate missing, skipped.")
             continue
 
         result        = match_soil(lat, lon, soil_files)
@@ -657,37 +657,37 @@ def batch_match(locations: list[dict]) -> list[dict]:
         result["name"]= name
         results.append(result)
 
-        # Cache miss ise API rate-limit'e saygı göster
+        # Respect API rate limit on cache miss
         if not result.get("sg_from_cache") and i < total:
-            print(f"    API çağrısı yapıldı — {API_SLEEP_SECONDS}s bekleniyor...")
+            print(f"    API call made — waiting {API_SLEEP_SECONDS}s...")
             time.sleep(API_SLEEP_SECONDS)
 
     return results
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 6. Giriş noktası
+# 6. Entry point
 # ══════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
 
-    # ── Koordinat listesi — buraya kendi lokasyonlarınızı ekleyin ──────────
+    # ── Coordinate list — add your own locations here ───────────────────────
     locations = [
-        {"name": "İzmir - Kemalpaşa Ovası",  "lat": 38.43, "lon": 27.41},
-        {"name": "Konya Ovası",               "lat": 37.87, "lon": 32.48},
-        {"name": "Trakya - Edirne",           "lat": 41.67, "lon": 26.56},
-        {"name": "Çukurova - Adana",          "lat": 37.00, "lon": 35.32},
-        {"name": "Gediz Havzası - Alaşehir",  "lat": 38.35, "lon": 28.51},
+        {"name": "Izmir - Kemalpasa Plain",   "lat": 38.43, "lon": 27.41},
+        {"name": "Konya Plain",               "lat": 37.87, "lon": 32.48},
+        {"name": "Thrace - Edirne",           "lat": 41.67, "lon": 26.56},
+        {"name": "Cukurova - Adana",          "lat": 37.00, "lon": 35.32},
+        {"name": "Gediz Basin - Alasehir",    "lat": 38.35, "lon": 28.51},
     ]
 
     results = batch_match(locations)
 
-    # ── Özet tablo ─────────────────────────────────────────────────────────
+    # ── Summary table ──────────────────────────────────────────────────────
     print(f"\n{'═'*90}")
-    print("ÖZET TABLO")
+    print("SUMMARY TABLE")
     print(f"{'═'*90}")
     hdr = "{:<30} {:<16} {:>8}  {:<22} {}"
-    print(hdr.format("Lokasyon", "Texture", "AWC ref.", "En iyi dosya", "SOLNAM"))
+    print(hdr.format("Location", "Texture", "AWC ref.", "Best file", "SOLNAM"))
     print("─" * 90)
     for r in results:
         bm = r["best_match"]
@@ -699,7 +699,7 @@ if __name__ == "__main__":
             bm.get("SOLNAM", ""),
         ))
 
-    # ── JSON kaydet ────────────────────────────────────────────────────────
+    # ── Save JSON ──────────────────────────────────────────────────────────
     with open(OUTPUT_JSON, "w", encoding="utf-8") as fh:
         json.dump(results, fh, ensure_ascii=False, indent=2)
-    print(f"\n💾 Sonuçlar kaydedildi: {OUTPUT_JSON}")
+    print(f"\n💾 Results saved: {OUTPUT_JSON}")

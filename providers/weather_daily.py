@@ -9,7 +9,7 @@ import time
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# 1. API İstemcisi ve Cache Yapılandırması
+# 1. API Client and Cache Configuration
 cache_session = requests_cache.CachedSession(os.path.join(script_dir, '.cache'), expire_after=-1)
 retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
 openmeteo = openmeteo_requests.Client(session=retry_session)
@@ -19,7 +19,7 @@ def _extract_single_year(start_date, end_date):
     start_year = pd.to_datetime(start_date).year
     end_year = pd.to_datetime(end_date).year
     if start_year != end_year:
-        raise ValueError("start_date ve end_date ayni yil icinde olmalidir.")
+        raise ValueError("start_date and end_date must be within the same year.")
     return str(start_year)
 
 
@@ -37,7 +37,7 @@ def _request_daily_with_retry(url, params, max_attempts=5, wait_seconds=65):
         except Exception as e:
             last_error = e
             if _is_rate_limit_error(e) and attempt < max_attempts:
-                print(f"Rate limit alindi. {wait_seconds} sn bekleniyor (deneme {attempt}/{max_attempts})...")
+                print(f"Rate limit reached. Waiting {wait_seconds}s (attempt {attempt}/{max_attempts})...")
                 time.sleep(wait_seconds)
                 continue
             raise
@@ -62,7 +62,7 @@ def _location_slug(location, index):
 
 def fetch_and_save_pcse_weather(locations_source, start_date, end_date):
     if isinstance(locations_source, str) and not os.path.exists(locations_source):
-        print(f"Hata: {locations_source} bulunamadı.")
+        print(f"Error: {locations_source} not found.")
         return
 
     locations = _load_locations(locations_source)
@@ -79,15 +79,15 @@ def fetch_and_save_pcse_weather(locations_source, start_date, end_date):
         file_path = os.path.join(output_dir, f"{safe_name}.csv")
 
         if os.path.exists(file_path):
-            print(f"Atlandi (cache): {safe_name}.csv")
+            print(f"Skipped (cache): {safe_name}.csv")
             continue
 
-        # Dakikalik API limitine takilmamak icin istekleri hafifce yay.
+        # Spread requests slightly to avoid hitting the per-minute API limit.
         if idx > 0:
             time.sleep(1.2)
-        
+
         label = loc.get("location_id", f"{loc['latitude']}, {loc['longitude']}")
-        print(f"Veri çekiliyor: {label}...")
+        print(f"Fetching data: {label}...")
 
         params = {
             "latitude": loc["latitude"],
@@ -127,17 +127,16 @@ def fetch_and_save_pcse_weather(locations_source, start_date, end_date):
             wind = daily.Variables(4).ValuesAsNumpy()
             tdew = daily.Variables(5).ValuesAsNumpy()
 
-            # --- PCSE / WOFOST Dönüşümleri ---
-            
-            # 1. VAP (Buhar Basıncı) Hesaplama: hPa cinsinden (Tetens Formülü)
-            # tdew santigrat derece cinsindendir.
-            vap_hpa = 6.1078 * np.exp((17.27 * tdew) / (tdew + 237.3))
-            
-            # 2. VAP Güvenlik Sınırı (Clipping): 
-            # PCSE üst sınırı 199.3'tür ancak 50 hPa üzerindeki değerler meteorolojik hatadır.
-            # 0.6 hPa (çok kuru) ile 50.0 hPa (çok nemli/sıcak) arasına sabitliyoruz.
-            vap_kpa = vap_hpa / 10 # hPa -> kPa
+            # --- PCSE / WOFOST Conversions ---
 
+            # 1. VAP (Vapour Pressure) calculation: in hPa (Tetens formula)
+            # tdew is in degrees Celsius.
+            vap_hpa = 6.1078 * np.exp((17.27 * tdew) / (tdew + 237.3))
+
+            # 2. VAP safety clipping:
+            # PCSE upper limit is 199.3 but values above 50 hPa are meteorological errors.
+            # We clip to between 0.6 hPa (very dry) and 50.0 hPa (very humid/hot).
+            vap_kpa = vap_hpa / 10  # hPa -> kPa
 
             # 3. IRRAD (MJ/m2 -> kJ/m2)
             irrad_kj = np.maximum(0, irrad_mj * 1000)
@@ -147,7 +146,7 @@ def fetch_and_save_pcse_weather(locations_source, start_date, end_date):
                 "IRRAD": irrad_kj.astype(float),
                 "TMIN": tmin.astype(float),
                 "TMAX": tmax.astype(float),
-                "VAP": vap_kpa.astype(float), # Artık hPa cinsinden ve limitli
+                "VAP": vap_kpa.astype(float), # Now in hPa and clipped
                 "WIND": wind.astype(float),
                 "RAIN": precip.astype(float),
                 "SNOWDEPTH": 0.0 
@@ -159,7 +158,7 @@ def fetch_and_save_pcse_weather(locations_source, start_date, end_date):
             if elevation is None:
                 elevation = response.Elevation() if response.Elevation() is not None else 100.0
 
-            # DOSYA YAZMA
+            # WRITE FILE
             with open(file_path, 'w', encoding='utf-8', newline='') as f_out:
                 f_out.write("## Site Characteristics\n")
                 f_out.write("Country='Turkey'\n")
@@ -177,11 +176,11 @@ def fetch_and_save_pcse_weather(locations_source, start_date, end_date):
                 
                 df.to_csv(f_out, index=False, header=True, float_format='%.2f')
             
-            print(f"Başarılı: {safe_name}.csv oluşturuldu.")
+            print(f"Success: {safe_name}.csv created.")
 
         except Exception as e:
-            print(f"Hata oluştu ({label}): {e}")
+            print(f"Error occurred ({label}): {e}")
 
-# --- İŞLEMİ BAŞLAT ---
+# --- START PROCESS ---
 if __name__ == "__main__":
     fetch_and_save_pcse_weather('districs_soil.json', '2024-01-01', '2024-12-31')

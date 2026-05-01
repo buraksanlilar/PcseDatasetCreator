@@ -1,13 +1,13 @@
 """
-theta_multiyear.py pipeline'ının küçük ölçekli dry run testi.
+Small-scale dry run test of the theta_multiyear.py pipeline.
 
-Kontrol eder:
-  - Soil matcher entegrasyonu
-  - Hava verisi çekme (daily + hourly)
-  - WOFOST simülasyonu (3 WAV senaryosu)
-  - Merge ve çıktı kolonları (TWSO, sim_success, wav_scenario...)
+Checks:
+  - Soil matcher integration
+  - Weather data fetching (daily + hourly)
+  - WOFOST simulation (3 WAV scenarios)
+  - Merge and output columns (TWSO, sim_success, wav_scenario...)
 
-Kullanım:
+Usage:
     python scripts/dry_run_multiyear.py
 """
 
@@ -40,15 +40,15 @@ YEAR       = 2022
 TEST_CROPS = ["wheat", "maize", "rapeseed", "faba_bean"]
 
 TEST_LOCATIONS = [
-    {"latitude": 39.0, "longitude": 35.0},   # İç Anadolu
+    {"latitude": 39.0, "longitude": 35.0},   # Central Anatolia
     {"latitude": 37.0, "longitude": 32.0},   # Konya
     {"latitude": 41.0, "longitude": 29.0},   # Marmara
 ]
 
 WAV_SCENARIOS = {
-    "kuru":   10,
+    "dry":    10,
     "normal": 50,
-    "islak":  100,
+    "wet":    100,
 }
 
 crop_dir         = os.path.join(project_root, "crops")
@@ -93,7 +93,7 @@ def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
     _tmp_files.append(tmp.name)
     return CSVWeatherDataProvider(tmp.name, dateformat="%Y%m%d", delimiter=",")
 
-# ── Yardımcı fonksiyonlar (theta_multiyear'dan alındı) ───────────────────────
+# ── Helper functions (taken from theta_multiyear) ────────────────────────────
 
 def _shift_date_to_year(date_value, year):
     dt = pd.to_datetime(date_value)
@@ -148,18 +148,18 @@ def choose_valid_variety(cropd, crop_name, varieties):
             continue
     return None
 
-# ── Ana test ──────────────────────────────────────────────────────────────────
+# ── Main test ─────────────────────────────────────────────────────────────────
 
 def main():
     print("=" * 60)
-    print("DRY RUN — theta_multiyear pipeline testi")
-    print(f"Yıl: {YEAR}  |  Bitkiler: {TEST_CROPS}  |  Lokasyon: {len(TEST_LOCATIONS)}")
+    print("DRY RUN — theta_multiyear pipeline test")
+    print(f"Year: {YEAR}  |  Crops: {TEST_CROPS}  |  Locations: {len(TEST_LOCATIONS)}")
     print("=" * 60)
 
     # 1. Soil matcher
-    print("\n[1] Soil matcher yükleniyor...")
+    print("\n[1] Loading soil matcher...")
     soil_files_data = load_soil_files(soil_dir)
-    print(f"    {len(soil_files_data)} WOFOST dosyası yüklendi.")
+    print(f"    {len(soil_files_data)} WOFOST files loaded.")
 
     locations = []
     for i, coord in enumerate(TEST_LOCATIONS):
@@ -173,24 +173,24 @@ def main():
         })
 
     # 2. Elevation
-    print("\n[2] Elevation çekiliyor...")
+    print("\n[2] Fetching elevation...")
     elevations = fetch_batch_elevations(locations)
     for loc, elev in zip(locations, elevations):
         loc["elevation"] = elev if elev is not None else 100.0
         print(f"    {loc['location_id']}  ({loc['latitude']}, {loc['longitude']})  "
               f"elev={loc['elevation']:.0f}m  soil={loc['soil_file']}")
 
-    # 3. Hava verisi
+    # 3. Weather data
     start_date = f"{YEAR}-01-01"
     end_date   = f"{YEAR}-12-31"
 
-    print(f"\n[3] Günlük hava verisi çekiliyor ({YEAR})...")
+    print(f"\n[3] Fetching daily weather data ({YEAR})...")
     fetch_and_save_pcse_weather(locations, start_date, end_date)
 
-    print(f"\n[4] Saatlik hava verisi çekiliyor ({YEAR})...")
+    print(f"\n[4] Fetching hourly weather data ({YEAR})...")
     fetch_hourly_sensor_data(locations, start_date, end_date)
 
-    # 4. Bitki ve agro
+    # 4. Crop and agro
     cropd = YAMLCropDataProvider(fpath=crop_dir, force_reload=True)
     all_crops_varieties = cropd.get_crops_varieties()
 
@@ -199,17 +199,17 @@ def main():
         varieties = all_crops_varieties.get(crop_name, set())
         variety   = choose_valid_variety(cropd, crop_name, varieties)
         if variety is None:
-            print(f"    [UYARI] {crop_name} için geçerli variety bulunamadı.")
+            print(f"    [WARNING] No valid variety found for {crop_name}.")
             continue
         agro_path = os.path.join(agro_dir, f"{crop_name}_calendar.agro")
         if not os.path.exists(agro_path):
-            print(f"    [UYARI] {crop_name}_calendar.agro bulunamadı.")
+            print(f"    [WARNING] {crop_name}_calendar.agro not found.")
             continue
         valid_pairs.append((crop_name, variety, agro_path))
 
-    # 5. Simülasyon
-    print(f"\n[5] WOFOST simülasyonları ({len(valid_pairs)} bitki × "
-          f"{len(locations)} lokasyon × {len(WAV_SCENARIOS)} senaryo)...")
+    # 5. Simulation
+    print(f"\n[5] WOFOST simulations ({len(valid_pairs)} crops × "
+          f"{len(locations)} locations × {len(WAV_SCENARIOS)} scenarios)...")
 
     all_rows = []
     errors   = []
@@ -218,7 +218,7 @@ def main():
         agro_raw = YAMLAgroManagementReader(agro_path)
         agro     = patch_agromanagement_for_year(agro_raw, crop_name, variety_name, YEAR)
 
-        # Kışlık bitkiler için hasat yılını belirle
+        # Determine harvest year for winter crops
         try:
             last_camp = agro[-1]
             cc = last_camp[next(iter(last_camp))].get("CropCalendar") or {}
@@ -227,7 +227,7 @@ def main():
             crop_end_year = YEAR
 
         if crop_end_year > YEAR:
-            print(f"    [{crop_name}] Kışlık bitki → {crop_end_year} hava verisi çekiliyor...")
+            print(f"    [{crop_name}] Winter crop → fetching {crop_end_year} weather data...")
             fetch_and_save_pcse_weather(locations, f"{crop_end_year}-01-01", f"{crop_end_year}-12-31")
 
         for loc in locations:
@@ -237,7 +237,7 @@ def main():
             hourly_csv = os.path.join(hourly_weather_dir, str(YEAR), f"{loc_id}_hourly.csv")
 
             if not all(os.path.exists(p) for p in [soil_path, daily_csv, hourly_csv]):
-                errors.append(f"Eksik dosya: {loc_id} / {crop_name}")
+                errors.append(f"Missing file: {loc_id} / {crop_name}")
                 continue
 
             soild = CABOFileReader(soil_path)
@@ -247,7 +247,7 @@ def main():
             try:
                 wdp = _make_daily_wdp(loc_id, YEAR, crop_end_year)
             except Exception as e:
-                errors.append(f"Hava yükleme hatası {loc_id}/{crop_name}: {e}")
+                errors.append(f"Weather load error {loc_id}/{crop_name}: {e}")
                 continue
 
             df_hourly = pd.read_csv(hourly_csv)
@@ -262,16 +262,16 @@ def main():
                     wofost = Wofost72_WLP_CWB(params, wdp, agro)
                     wofost.run_till_terminate()
                 except Exception as e:
-                    errors.append(f"Sim hatası {loc_id}/{crop_name}/{wav_scenario}: {e}")
+                    errors.append(f"Sim error {loc_id}/{crop_name}/{wav_scenario}: {e}")
                     continue
 
                 output  = wofost.get_output()
                 df_pcse = pd.DataFrame(output)
                 if df_pcse.empty:
-                    errors.append(f"Boş çıktı: {loc_id}/{crop_name}/{wav_scenario}")
+                    errors.append(f"Empty output: {loc_id}/{crop_name}/{wav_scenario}")
                     continue
 
-                # Hasat verimi: WOFOST çıktısından son TWSO değeri (kışlık bitkiler dahil)
+                # Harvest yield: last TWSO value from WOFOST output (including winter crops)
                 twso_series  = df_pcse["TWSO"].dropna() if "TWSO" in df_pcse.columns else pd.Series([], dtype=float)
                 harvest_twso = float(twso_series.iloc[-1]) if not twso_series.empty else 0.0
 
@@ -296,12 +296,12 @@ def main():
 
                 all_rows.append(merged)
                 print(f"    ✓ {loc_id} | {crop_name} | {wav_scenario:6s} | "
-                      f"hasat={'evet' if harvest_twso > 0 else 'hayır'} | harvest_twso={harvest_twso:.1f}")
+                      f"harvest={'yes' if harvest_twso > 0 else 'no'} | harvest_twso={harvest_twso:.1f}")
 
-    # 6. Sonuç
+    # 6. Results
     print("\n" + "=" * 60)
     if errors:
-        print(f"HATALAR ({len(errors)}):")
+        print(f"ERRORS ({len(errors)}):")
         for e in errors:
             print(f"  ✗ {e}")
 
@@ -310,11 +310,11 @@ def main():
         out_path = os.path.join(project_root, "output", "dry_run_multiyear.csv")
         os.makedirs(os.path.dirname(out_path), exist_ok=True)
         df_out.to_csv(out_path, index=False)
-        print(f"\nSatır sayısı : {len(df_out):,}")
-        print(f"Kolonlar     : {list(df_out.columns)}")
-        print(f"Çıktı        : {out_path}")
+        print(f"\nRow count : {len(df_out):,}")
+        print(f"Columns   : {list(df_out.columns)}")
+        print(f"Output    : {out_path}")
     else:
-        print("Hiçbir simülasyon tamamlanamadı.")
+        print("No simulation could be completed.")
 
     for tmp_path in _tmp_files:
         try:

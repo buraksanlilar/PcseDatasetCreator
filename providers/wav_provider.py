@@ -1,13 +1,13 @@
 """WAV provider for PCSE/WOFOST site configuration.
 
-Düzeltmeler ve iyileştirmeler:
-  1. WAV hesabında m³/m³ × cm → cm dönüşümü düzeltildi
-  2. 81-100 cm arası için Open-Meteo'nun son katmanı extrapolate edildi
-  3. SoilGrids label formatı normalizasyonu eklendi
-  4. Katman ağırlıklı ortalama ile daha doğru eşleştirme
-  5. SoilGrids null koordinat için nearest-neighbor fallback eklendi
-  6. eksik katmanlarda clay/sand/soc PTF (Saxton-Rawls 2006) ile
-      field capacity / başlangıç nemi fallback'i
+Fixes and improvements:
+  1. Corrected m³/m³ × cm → cm conversion in WAV calculation
+  2. Extrapolated Open-Meteo's last layer for the 81-100 cm range
+  3. Added SoilGrids label format normalisation
+  4. More accurate matching via layer-weighted average
+  5. Added nearest-neighbor fallback for null SoilGrids coordinates
+  6. For missing layers: field capacity / initial moisture fallback using
+     clay/sand/soc PTF (Saxton-Rawls 2006)
 """
 
 from __future__ import annotations
@@ -59,13 +59,13 @@ _SOILGRIDS_LABEL_ALIASES = {
     "60-100":"60-100cm",
 }
 
-# Nearest-neighbor arama parametreleri
-_NN_STEP_DEG = 0.1   # Her adımda kaç derece genişleyelim
-_NN_MAX_DEG  = 0.5   # Maksimum arama yarıçapı (derece) ≈ 55 km
+# Nearest-neighbor search parameters
+_NN_STEP_DEG = 0.1   # Degrees to expand each step
+_NN_MAX_DEG  = 0.5   # Maximum search radius (degrees) ≈ 55 km
 
 
 # ---------------------------------------------------------------------------
-# Yardımcı fonksiyonlar
+# Helper functions
 # ---------------------------------------------------------------------------
 
 def _request_json(
@@ -92,15 +92,15 @@ def _request_json(
 
 
 def _normalize_soilgrids_label(raw_label: str) -> str:
-    """'0-5' → '0-5cm' gibi format farklarını normalize eder."""
+    """Normalises format differences such as '0-5' → '0-5cm'."""
     label = str(raw_label).strip()
     return _SOILGRIDS_LABEL_ALIASES.get(label, label)
 
 
 def _soilgrids_coord_has_data(lat: float, lon: float) -> bool:
     """
-    Verilen koordinatta SoilGrids'in clay verisi var mı diye hızlıca kontrol eder.
-    Sadece ilk depth katmanına bakar — yeterli.
+    Quickly checks whether SoilGrids has clay data for the given coordinate.
+    Only inspects the first depth layer — sufficient.
     """
     payload = _request_json(
         cache_session,
@@ -119,17 +119,17 @@ def _soilgrids_coord_has_data(lat: float, lon: float) -> bool:
 
 def _find_nearest_valid_soilgrids(lat: float, lon: float) -> tuple[float, float]:
     """
-    Merkez koordinat SoilGrids'te boşsa, spiral genişleyen grid'de
-    ilk geçerli noktayı bulur.
+    If the centre coordinate is empty in SoilGrids, finds the first valid point
+    in a spirally expanding grid.
 
-    Dönüş: (valid_lat, valid_lon) — merkez geçerliyse orijinali döner.
+    Returns: (valid_lat, valid_lon) — returns the original if centre is valid.
     """
-    # Merkezi önce dene
+    # Try centre first
     if _soilgrids_coord_has_data(lat, lon):
         return lat, lon
 
     logger.info(
-        "SoilGrids (%.4f, %.4f) boş — nearest-neighbor aranıyor", lat, lon
+        "SoilGrids (%.4f, %.4f) empty — searching nearest-neighbor", lat, lon
     )
 
     r = _NN_STEP_DEG
@@ -152,19 +152,19 @@ def _find_nearest_valid_soilgrids(lat: float, lon: float) -> tuple[float, float]
             if _soilgrids_coord_has_data(clat, clon):
                 best_lat, best_lon, best_dist = clat, clon, dist
                 logger.info(
-                    "  ✓ Geçerli nokta: (%.4f, %.4f) — orijinalden ~%.1f km",
+                    "  ✓ Valid point: (%.4f, %.4f) — ~%.1f km from original",
                     clat, clon, dist * 111,
                 )
                 break
         else:
             r = round(r + _NN_STEP_DEG, 2)
             continue
-        break   # geçerli nokta bulundu, aramayı durdur
+        break   # valid point found, stop search
 
     if best_lat is None:
         logger.warning(
-            "%.1f derece yarıçap içinde geçerli SoilGrids noktası bulunamadı, "
-            "orijinal koordinat kullanılıyor (PTF devreye girecek)",
+            "No valid SoilGrids point found within %.1f degree radius, "
+            "using original coordinate (PTF will be applied)",
             _NN_MAX_DEG,
         )
         return lat, lon
@@ -178,15 +178,15 @@ def _find_nearest_valid_soilgrids(lat: float, lon: float) -> tuple[float, float]
 
 def _saxton_rawls_wp(clay_pct: float, sand_pct: float, soc_pct: float = 0.5) -> float:
     """
-    Saxton & Rawls (2006) PTF ile wilting point tahmini (m³/m³).
+    Wilting point estimation using Saxton & Rawls (2006) PTF (m³/m³).
 
-    clay_pct : 0-100 yüzde
-    sand_pct : 0-100 yüzde
-    soc_pct  : organik karbon yüzdesi (varsayılan 0.5)
+    clay_pct : 0-100 percent
+    sand_pct : 0-100 percent
+    soc_pct  : organic carbon percentage (default 0.5)
     """
     S  = sand_pct / 100.0
     C  = clay_pct / 100.0
-    OM = soc_pct  / 100.0 * 1.724   # SOC → OM dönüşümü
+    OM = soc_pct  / 100.0 * 1.724   # SOC → OM conversion
 
     theta_1500t = (
         -0.024 * S
@@ -203,11 +203,11 @@ def _saxton_rawls_wp(clay_pct: float, sand_pct: float, soc_pct: float = 0.5) -> 
 
 def _saxton_rawls_fc(clay_pct: float, sand_pct: float, soc_pct: float = 0.5) -> float:
     """
-    Saxton & Rawls (2006) PTF ile field capacity tahmini (m³/m³).
+    Field capacity estimation using Saxton & Rawls (2006) PTF (m³/m³).
 
-    clay_pct : 0-100 yüzde
-    sand_pct : 0-100 yüzde
-    soc_pct  : organik karbon yüzdesi (varsayılan 0.5)
+    clay_pct : 0-100 percent
+    sand_pct : 0-100 percent
+    soc_pct  : organic carbon percentage (default 0.5)
     """
     S = sand_pct / 100.0
     C = clay_pct / 100.0
@@ -228,10 +228,10 @@ def _saxton_rawls_fc(clay_pct: float, sand_pct: float, soc_pct: float = 0.5) -> 
 
 def _fetch_soilgrids_texture(lat: float, lon: float) -> Dict[str, Dict[str, float]]:
     """
-    clay, sand, soc değerlerini her derinlik için çeker.
-    Dönüş: {"0-5cm": {"clay": 25.0, "sand": 40.0, "soc": 0.8}, ...}
+    Fetches clay, sand, soc values for each depth.
+    Returns: {"0-5cm": {"clay": 25.0, "sand": 40.0, "soc": 0.8}, ...}
     """
-    # Fallback: killi-tınlı Akdeniz toprağı ortalaması
+    # Fallback: clay-loam Mediterranean soil average
     result: Dict[str, Dict[str, float]] = {
         label: {"clay": 30.0, "sand": 35.0, "soc": 0.5}
         for label, *_ in SOILGRIDS_DEPTHS
@@ -245,7 +245,7 @@ def _fetch_soilgrids_texture(lat: float, lon: float) -> Dict[str, Dict[str, floa
             timeout=30,
         )
         if not payload:
-            logger.warning("SoilGrids %s çekilemedi, default kullanılıyor", prop)
+            logger.warning("SoilGrids %s could not be fetched, using default", prop)
             continue
 
         for layer in payload.get("properties", {}).get("layers", []):
@@ -296,8 +296,8 @@ def _fetch_openmeteo(lat: float, lon: float, reference_date: str | None = None) 
 
 def _fetch_soilgrids_wp_rest(lat: float, lon: float) -> Dict[str, float]:
     """
-    wv1500'i doğrudan çeker.
-    Null/boş gelirse {} döner → çağıran PTF'e geçer.
+    Directly fetches wv1500.
+    Returns {} if null/empty → caller falls back to PTF.
     """
     payload = _request_json(
         cache_session,
@@ -306,7 +306,7 @@ def _fetch_soilgrids_wp_rest(lat: float, lon: float) -> Dict[str, float]:
         timeout=30,
     )
     if not payload:
-        logger.warning("SoilGrids REST yanıt vermedi")
+        logger.warning("SoilGrids REST did not respond")
         return {}
 
     result: Dict[str, float] = {}

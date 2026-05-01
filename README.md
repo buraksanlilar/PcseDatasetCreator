@@ -1,566 +1,166 @@
 # PCSE Dataset Creator
 
-A comprehensive tool for creating agricultural simulation datasets by integrating weather, soil, and crop management data from various regions. This tool generates datasets for **PCSE (Python Crop Simulation Environment)** simulations.
+Agricultural simulation dataset generator for training machine learning models on crop yield prediction. Combines WOFOST 7.2 crop simulation outputs with real-world weather and soil data to produce hourly time-series datasets.
 
-## 📋 About the Project
+## What it does
 
-This project uses the WOFOST 7.2 (World Food Studies) crop simulation model to:
+Runs the WOFOST 7.2 (World Food Studies) crop model across a grid of locations in Turkey (36–42°N, 26–45°E), multiple years, and multiple crops. For each combination, it simulates how the crop grows day by day and merges the result with hourly sensor-style weather data. The final dataset is suitable for training models that predict seasonal yield (`harvest_twso`) from weather and crop state observations.
 
-- 📊 **Multi-crop simulations**: Barley, wheat, maize, rice, and 20+ crop types
-- 🌍 **Regional coverage**: Real weather data from Turkish districts via OpenMeteo API
-- 🌱 **Comprehensive data integration**: Weather, soil, crop parameters, and agronomic management data
-- 📈 **Hourly and daily data**: Detailed time series analysis
+Three water availability scenarios (`kuru/normal/islak`) are simulated per location-crop-year combination to expose the model to varying moisture conditions.
 
-## 🚀 Installation
-
-### Required Packages
+## Installation
 
 ```bash
-pip install pcse pandas matplotlib numpy openmeteo-requests requests-cache retry-requests pyyaml
+pip install pcse pandas numpy openmeteo-requests requests-cache retry-requests pyyaml tqdm global-land-mask
 ```
 
-### Python Version
+Python 3.10 or higher recommended.
 
-- Python 3.8 or higher
-
-## 📁 Project Structure
+## Project structure
 
 ```
 PcseDatasetCreator/
-├── cropTypes/              # Crop parameters (YAML format)
-│   ├── crops.yaml          # Main crop definitions
-│   ├── wheat.yaml
-│   ├── maize.yaml
-│   └── ... (23+ crop types)
 │
-├── agroManagement/         # Agricultural management calendars
-│   ├── wheat_calendar.agro
-│   ├── maize_calendar.agro
-│   └── ... (23+ calendars)
+├── simulation/
+│   ├── simulation.py              # Main script — runs the full dataset generation
+│   └── simulation_single_year.py # Single-year variant (kept for reference)
 │
-├── soilTypes/              # Soil parameters
-│   ├── *.new               # Soil type files
-│   ├── *.awc               # Available water capacity
-│   └── *.sol               # Soil properties
+├── providers/                     # Data fetching modules
+│   ├── weather_daily.py           # Fetches daily weather in PCSE format from OpenMeteo
+│   ├── weather_hourly.py          # Fetches hourly sensor data from OpenMeteo
+│   ├── elevation.py               # Fetches elevation per coordinate
+│   ├── soilgrids.py               # Queries SoilGrids API for sand/silt/clay percentages
+│   ├── soil_matcher.py            # Matches SoilGrids texture to local WOFOST soil files
+│   ├── openlandmap.py             # Fallback soil data source (used internally by soil_matcher)
+│   ├── wav_provider.py            # Site parameter helper (used by simulation_single_year)
+│   └── weather_data/
+│       ├── daily/{year}/*.csv     # Cached daily weather, one file per location per year
+│       └── hourly/{year}/*.csv    # Cached hourly weather, one file per location per year
 │
-├── openmeteo/              # Weather data fetching and processing
-│   ├── daily.py            # Daily weather data fetcher
-│   ├── hourly.py           # Hourly weather data fetcher
-│   ├── pcse_weather_data/  # Processed daily weather data
-│   └── hourly_weather_data/# Raw hourly weather data
+├── crops/                         # WOFOST crop parameter files (YAML, 23+ crops)
+├── agro/                          # Agromanagement calendars (sowing/harvest dates per crop)
+├── soils/                         # WOFOST soil parameter files (CABO format)
 │
-├── pcseData/               # Main simulation scripts
-│   ├── theta_final.py      # Main simulation for all crops (recommended)
-│   ├── test5.py            # Alternative simulation script
-│   ├── beta.py
-│   ├── alpha.py
-│   └── districs_soil.json  # District-soil type mapping
+├── scripts/                       # Testing and validation scripts
+│   ├── test_pipeline.py           # Full pipeline dry run (small scale)
+│   ├── test_locations.py          # Tests location grid building and soil matching
+│   ├── test_single_location.py    # Tests one location end-to-end
+│   ├── test_soil_matcher.py       # Tests SoilGrids → WOFOST file matching
+│   ├── test_soil_match.py         # Prints detailed soil match report for sample coords
+│   ├── test_soilgrids.py          # Tests raw SoilGrids API queries
+│   └── soil_site_validation.py    # Validates soil matches across all grid locations
 │
-└── dataset_output/         # Output datasets
-    └── final_hourly_pcse_dataset_all_crops.csv
+└── output/                        # Generated datasets (CSV files, gitignored)
 ```
 
-## 📖 How to Use
+## How to run
 
-### Step 1: Prepare Districts and Soil Configuration
-
-Before fetching weather data, configure your districts and their soil types.
-
-**Edit**: `pcseData/districs_soil.json`
-
-```json
-[
-  {
-    "district": "Izmir, Menemen",
-    "latitude": 38.60819,
-    "longitude": 27.08609,
-    "soilType": "ec3.new"
-  },
-  {
-    "district": "Ankara, Polatlı",
-    "latitude": 38.7528,
-    "longitude": 33.0038,
-    "soilType": "m02.awc"
-  }
-]
-```
-
-**Parameters Explanation**:
-
-- `district`: Region name (format: "Province, District")
-- `latitude`: Decimal latitude coordinate (find on Google Maps)
-- `longitude`: Decimal longitude coordinate (find on Google Maps)
-- `soilType`: Soil type filename from `soilTypes/` directory
-
-**How to find coordinates**:
-
-1. Go to [Google Maps](https://maps.google.com)
-2. Right-click on your location
-3. Click the coordinates at the top
-4. Coordinates appear at the bottom in decimal format
-
-### Step 2: Fetch Weather Data
-
-Download and process weather data from OpenMeteo API for your configured districts.
-
-#### 2a. Daily Weather Data
-
-**Edit**: `openmeteo/daily.py` (Optional - only if customizing)
-
-You can customize the weather parameters fetched:
-
-```python
-# Line ~35 - Available weather parameters:
-# temperature_2m_mean, precipitation_sum, windspeed_10m_max,
-# relative_humidity_2m, et0_fao_evapotranspiration, soil_moisture_0_to_10cm
-
-url_params = {
-    "latitude": lat,
-    "longitude": lon,
-    "start_date": start_date,
-    "end_date": end_date,
-    "daily": "temperature_2m_mean,precipitation_sum,windspeed_10m_max,relative_humidity_2m,et0_fao_evapotranspiration",
-    "timezone": "auto"
-}
-```
-
-**Run** to fetch daily data:
+### Full dataset generation
 
 ```bash
-cd openmeteo/
-python daily.py
+python simulation/simulation.py
 ```
 
-This creates: `pcse_weather_data/{district}_daily.csv`
+This will:
+1. Build a grid of ~71 land points across Turkey
+2. Fetch elevation and match each point to a WOFOST soil file via SoilGrids
+3. For each year (2014–2024), fetch daily and hourly weather per location
+4. Run WOFOST for every crop × location × year × WAV scenario combination
+5. Merge hourly weather with daily WOFOST outputs
+6. Save yearly CSVs to `output/yearly/` and a merged final CSV to `output/`
 
-#### 2b. Hourly Weather Data
+**Estimated runtime:** several hours depending on the number of crops and API rate limits.
 
-**Edit**: `openmeteo/hourly.py` (Optional - only if customizing)
-
-You can customize hourly parameters:
-
-```python
-# Line ~35 - Available hourly parameters:
-# temperature_2m, relative_humidity_2m, precipitation, windspeed_10m,
-# cloudcover, direct_radiation, sunshine_duration
-
-url_params = {
-    "latitude": lat,
-    "longitude": lon,
-    "start_date": start_date,
-    "end_date": end_date,
-    "hourly": "temperature_2m,relative_humidity_2m,precipitation,windspeed_10m,direct_radiation",
-    "timezone": "auto"
-}
-```
-
-**Run** to fetch hourly data:
+### Test scripts (run before the full run)
 
 ```bash
-cd openmeteo/
-python hourly.py
+python scripts/test_pipeline.py       # Recommended first check — 4 crops, 3 locations, 1 year
+python scripts/test_locations.py      # Verify grid generation and soil matching
+python scripts/test_soil_match.py     # Print soil match details for sample coordinates
 ```
 
-This creates: `hourly_weather_data/{district}_hourly.csv`
-
-**Note**: Fetching hourly data may take several minutes depending on the date range and number of districts.
-
-### Step 3: Convert Weather Data to PCSE Format
-
-OpenMeteo data needs to be converted to PCSE-compatible format:
-
-```bash
-cd openmeteo/
-# The conversion is done automatically by daily.py and hourly.py
-# Output: pcse_weather_data/ directory
-```
-
-### Step 4: Run PCSE Simulations
-
-Run the main simulation for all configured crops and districts:
-
-```bash
-cd pcseData/
-
-# Main simulation (All crops × All districts)
-python theta_final.py
-```
-
-This script:
-
-1. Loads crop parameters from YAML files
-2. Reads weather data from CSV files
-3. Runs WOFOST 7.2 model for each crop-district combination
-4. Merges hourly weather data with simulation outputs
-5. Creates `final_hourly_pcse_dataset_all_crops.csv`
-
-**Processing time**: 5-30 minutes depending on crops and districts count
-
-### Step 5: Examine Output
-
-```python
-import pandas as pd
-
-df = pd.read_csv('pcseData/final_hourly_pcse_dataset_all_crops.csv')
-print(df.head())
-print(df.info())
-print(df.columns)
-```
-
-## 🔧 Customization Guide (Contribution Points)
-
-### 1. **Add New Crop Type**
-
-**Location**: `cropTypes/` directory  
-**File type**: `*.yaml`  
-**Source**: [WOFOST Crop Parameters](https://github.com/ajwdewit/WOFOST_crop_parameters)
-
-**Steps**:
-
-1. Download or create a new crop YAML file (e.g., `new_crop.yaml`)
-2. Place it in `cropTypes/`
-3. Create corresponding agro file in `agroManagement/new_crop_calendar.agro`
-
-**Example**:
-
-```yaml
-# cropTypes/sunflower.yaml
-Version: 1.0.0
-Metadata:
-  Creator: "Your Name"
-  Description: "Sunflower crop parameters"
-  Sowing_date: 2024-04-01
-  Harvesting_date: 2024-09-15
-
-PARVALDATA:
-  EMAXFL: 0.80
-  FRNX: 50
-  RDRSHM: 0.03
-  RUE: 3.9
-  # ... add more parameters
-```
-
-### 2. **Add New Agronomic Management Calendar**
-
-**Location**: `agroManagement/` directory  
-**File type**: `*_calendar.agro` (YAML format)  
-**Content**: Sowing date, fertilizer application, harvest date, irrigation schedule
-
-**Steps**:
-
-1. Create a new file named `{crop_name}_calendar.agro`
-2. Define planting and management events
-3. Ensure `crop_name` matches the crop in `cropTypes/`
-
-**Example**:
-
-```yaml
-# agroManagement/sunflower_calendar.agro
-version: 1.0
-AgroManagement:
-  - 2024-01-01:
-      CropCalendar:
-        crop_name: sunflower
-        variety_name: Sunflower_1401
-        crop_start_date: 2024-04-01
-        crop_end_date: 2024-09-15
-        max_duration: 200
-      Events:
-        - event_signal: sowing
-          name: Sowing
-          date: 2024-04-01
-        - event_signal: harvest
-          name: Harvest
-          date: 2024-09-15
-```
-
-### 3. **Add New Districts and Soil Types**
-
-**Location**: `pcseData/districs_soil.json`  
-**How to customize district configuration**:
-
-#### 3a. Finding Regional Coordinates
-
-```json
-{
-  "district": "Province Name, District Name",
-  "latitude": 38.7128,
-  "longitude": 27.0866,
-  "soilType": "ec3.new"
-}
-```
-
-**To find coordinates**:
-
-1. Open [Google Maps](https://maps.google.com)
-2. Search for your district/city center
-3. Right-click on the location
-4. Coordinates appear as: `38.7128, -75.0866`
-5. Convert to decimal format for JSON
-
-#### 3b. Selecting Soil Types
-
-Available soil types in `soilTypes/`:
-
-- **`.new` files**: Generic soil types (ec1.new, ec2.new, ec3.new, ec4.new, ec5.new, ec6.new, sr1.new, sr2.new, sr3.new, sr4.new)
-- **`.awc` files**: Available water capacity files (m01.awc, m02.awc, m03.awc, m04.awc, m05.awc, spg002.awc, spg003.awc, spg004.awc, spg005.awc, spg006.awc, spg007.awc)
-- **`.sol` files**: Soil solution files (soil_5.sol)
-
-**Match soil to region**:
-
-```json
-[
-  {
-    "district": "Ankara, Polatlı",
-    "latitude": 38.7528,
-    "longitude": 33.0038,
-    "soilType": "m02.awc" // Medium loam soil
-  },
-  {
-    "district": "Izmir, Menemen",
-    "latitude": 38.60819,
-    "longitude": 27.08609,
-    "soilType": "ec3.new" // Clay loam soil
-  }
-]
-```
-
-#### 3c. Full Example with Multiple Districts
-
-```json
-[
-  {
-    "district": "Ankara, Polatlı",
-    "latitude": 38.7528,
-    "longitude": 33.0038,
-    "soilType": "m02.awc"
-  },
-  {
-    "district": "Bursa, Karacabey",
-    "latitude": 40.2081,
-    "longitude": 28.4689,
-    "soilType": "ec2.new"
-  },
-  {
-    "district": "Konya, Karapınar",
-    "latitude": 37.6689,
-    "longitude": 33.6378,
-    "soilType": "m03.awc"
-  }
-]
-```
-
-### 4. **Add New Soil Type**
-
-**Location**: `soilTypes/` directory  
-**File format**: CABO format (`.new`, `.awc`, `.sol` extensions)
-
-**Steps**:
-
-1. Obtain soil parameters from local soil research institutes
-2. Convert to WOFOST CABO format
-3. Place file in `soilTypes/`
-4. Reference in `districs_soil.json`
-
-**Typical CABO format** (WOFOST soil file):
-
-```
-SOLNAM=Clay loam soil from Ankara
-CRAIRC=0.06  ! Critical soil air content
-SMFCF=0.35   ! Soil moisture at field capacity
-SM0=0.50     ! Soil porosity
-RDMSOL=150   ! Maximum rooting depth
-```
-
-### 5. **Customize Weather Data Fetching**
-
-**Location**: `openmeteo/daily.py` and `openmeteo/hourly.py`
-
-#### Available Weather Parameters
-
-**Daily parameters**:
-
-- `temperature_2m_mean` - Mean daily temperature
-- `precipitation_sum` - Total precipitation
-- `windspeed_10m_max` - Maximum wind speed
-- `relative_humidity_2m` - Relative humidity
-- `et0_fao_evapotranspiration` - Reference evapotranspiration
-- `soil_moisture_0_to_10cm` - Soil moisture
-
-**Hourly parameters**:
-
-- `temperature_2m` - Air temperature
-- `relative_humidity_2m` - Relative humidity
-- `precipitation` - Precipitation amount
-- `windspeed_10m` - Wind speed
-- `cloudcover` - Cloud coverage
-- `direct_radiation` - Direct solar radiation
-- `sunshine_duration` - Hours of sunshine
-
-#### Example: Modify daily.py
-
-```python
-# openmeteo/daily.py - Around line 35
-url_params = {
-    "latitude": lat,
-    "longitude": lon,
-    "start_date": start_date,
-    "end_date": end_date,
-    # Add or remove parameters as needed
-    "daily": "temperature_2m_mean,precipitation_sum,windspeed_10m_max,relative_humidity_2m,et0_fao_evapotranspiration,soil_moisture_0_to_10cm",
-    "timezone": "auto"
-}
-```
-
-#### Example: Modify hourly.py
-
-```python
-# openmeteo/hourly.py - Around line 35
-url_params = {
-    "latitude": lat,
-    "longitude": lon,
-    "start_date": start_date,
-    "end_date": end_date,
-    # Custom hourly parameters
-    "hourly": "temperature_2m,relative_humidity_2m,precipitation,windspeed_10m,direct_radiation,sunshine_duration",
-    "timezone": "auto"
-}
-```
-
-### 6. **Customize Simulation Parameters**
-
-**Location**: `pcseData/theta_final.py` (Line ~80)
-
-These parameters control groundwater and water availability:
-
-```python
-# WOFOST Site Configuration
-custom_site = {
-    "WAV": 100,      # Initial available water (mm) - Range: 0-200
-    "SMLIM": 0.36,   # Soil moisture limit (-) - Range: 0.0-1.0
-    "SSI": 0         # Initial soil moisture fraction (-) - Range: 0.0-1.0
-}
-```
-
-**Parameter Details**:
-
-| Parameter | Meaning              | Range    | Default | Adjustment                          |
-| --------- | -------------------- | -------- | ------- | ----------------------------------- |
-| `WAV`     | Available soil water | 0-200 mm | 100     | ⬆️ for wet climate, ⬇️ for dry      |
-| `SMLIM`   | Soil moisture limit  | 0.0-1.0  | 0.36    | ⬆️ increases water stress tolerance |
-| `SSI`     | Initial soil water   | 0.0-1.0  | 0       | ⬆️ simulates pre-watered soil       |
-
-**Example: Adjust for Dry Region**:
-
-```python
-custom_site = {
-    "WAV": 60,       # Less available water
-    "SMLIM": 0.40,   # Higher moisture limit
-    "SSI": 0.3       # Start with some moisture
-}
-```
-
-**Example: Adjust for Wet Region**:
-
-```python
-custom_site = {
-    "WAV": 150,      # More available water
-    "SMLIM": 0.30,   # Lower moisture limit
-    "SSI": 0.6       # Start fully watered
-}
-```
-
-### 7. **Filter Specific Crops or Districts**
-
-**Location**: `pcseData/theta_final.py`
-
-**To run only specific crops** (Line ~75):
-
-```python
-# Filter crops
-all_crops_varieties = cropd.get_crops_varieties()
-selected_crops = {k: v for k, v in all_crops_varieties.items() if k in ['wheat', 'maize']}
-
-for crop_name, varieties in selected_crops.items():
-    # ... simulation runs only for wheat and maize
-```
-
-**To run only specific districts** (Line ~100):
-
-```python
-# Filter districts
-selected_districts = [item for item in districts_data if 'Ankara' in item['district']]
-
-for item in selected_districts:
-    # ... simulation runs only for Ankara districts
-```
-
-## 📊 Output Dataset
-
-The generated CSV file contains the following columns:
-
-- `DATETIME` - Date and time
-- `day` - Simulation day
-- `district_name` - District name
-- `crop_name` - Crop type
-- `variety_name` - Crop variety
-- `LAI` - Leaf Area Index
-- `TAGP` - Total Harvestable Dry Matter
-- `TSUM` - Thermal Time Sum (°C days)
-- `Temperature` - Air temperature (°C)
-- `Precipitation` - Precipitation (mm)
-- `Relative_Humidity` - Relative humidity (%)
-- `Windspeed` - Wind speed (m/s)
-- `Direct_Radiation` - Solar radiation (J/m²)
-- _And other PCSE simulation outputs..._
-
-## 🐛 Troubleshooting
-
-| Error                  | Solution                                                                          |
-| ---------------------- | --------------------------------------------------------------------------------- |
-| "Crop file not found"  | Check that `{crop_name}.yaml` exists in `cropTypes/` directory                    |
-| "Agro file not found"  | Ensure `{crop_name}_calendar.agro` exists in `agroManagement/` directory          |
-| "Weather data missing" | Run `python openmeteo/daily.py` and `python openmeteo/hourly.py` first            |
-| "District not found"   | Verify district spelling in `districs_soil.json` matches weather data filename    |
-| "Soil file not found"  | Check that soil file referenced in `districs_soil.json` exists in `soilTypes/`    |
-| Simulation very slow   | Filter to fewer crops/districts for testing: see section 7 in Customization Guide |
-| Memory error           | Reduce number of districts or use smaller date ranges                             |
-
-## 📝 License
-
-MIT License - See LICENSE file for details
-
-## 👨‍💻 Libraries Used
-
-- **PCSE**: Python Crop Simulation Environment
-- **WOFOST**: World Food Studies crop simulation model (from Wageningen University)
-- **Pandas**: Data manipulation and analysis
-- **OpenMeteo API**: Free weather data service
-
-## 🔗 Useful Resources
-
-- [PCSE Documentation](https://pcse.readthedocs.io/)
-- [WOFOST Crop Parameters GitHub](https://github.com/ajwdewit/WOFOST_crop_parameters)
-- [OpenMeteo Weather API](https://open-meteo.com/)
-- [WOFOST in Wageningen](https://www.wur.nl/)
-- [CABO Soil File Format](https://www.eustafor.eu/)
-
-## 📞 Support & Contributing
-
-**To contribute**:
-
-1. Follow the Customization Guide sections above
-2. Test your changes with sample data
-3. Submit improvements via pull requests
-
-**For questions**:
-
-- Check the Troubleshooting section
-- Review PCSE documentation
-- Examine example scripts (`test2.py`, `test3.py`, etc.)
-
----
-
-**Last Updated**: March 2026  
-**Version**: 1.0.0  
-**Status**: Active Development
+## Configuration
+
+All key parameters are at the top of `simulation/simulation.py`:
+
+| Parameter | Default | Description |
+|---|---|---|
+| `LOCATION_MODE` | `"grid"` | `"grid"` or `"random"` |
+| `GRID_LAT_MIN/MAX` | `36.0 / 42.0` | Latitude bounds |
+| `GRID_LON_MIN/MAX` | `26.0 / 45.0` | Longitude bounds |
+| `GRID_LAT_STEP` | `1.0` | Grid step in degrees |
+| `GRID_LON_STEP` | `1.5` | Grid step in degrees |
+| `RANDOM_LOCATION_COUNT` | `24` | Number of random points (if `LOCATION_MODE="random"`) |
+| `years` | `range(2014, 2025)` | Years to simulate |
+| `WAV_SCENARIOS` | `kuru=10, normal=50, islak=100` | Initial soil water (cm) |
+
+Crops are loaded automatically from all YAML files in `crops/` that have a matching `.agro` file in `agro/` and a valid variety.
+
+## Output columns
+
+The final dataset contains one row per hour per simulated season.
+
+| Column | Description |
+|---|---|
+| `DATETIME` | Hourly timestamp |
+| `location_id` | Location identifier (e.g. `loc_0001`) |
+| `latitude`, `longitude`, `elevation` | Coordinates |
+| `soil_file` | WOFOST soil file used for this location |
+| `crop_name`, `variety_name` | Crop and variety |
+| `year` | Simulation year |
+| `wav_scenario` | Water scenario: `kuru`, `normal`, or `islak` |
+| `WAV` | Initial available water in cm (10, 50, or 100) |
+| `season_id` | Unique identifier for each simulated season |
+| `AIR_TEMP`, `AIR_HUMIDITY`, `PRECIP` | Hourly weather observations |
+| `SOIL_TEMP_0_7`, `SOIL_MOISTURE_0_7` | Hourly soil observations |
+| `DVS` | Development stage (0=emergence, 1=flowering, 2=maturity) |
+| `LAI` | Leaf area index |
+| `TAGP` | Total above-ground dry matter (kg/ha) |
+| `TWSO` | Daily dry weight of storage organs (kg/ha) |
+| `harvest_twso` | **ML target** — final yield at harvest (constant per season) |
+| `sim_success` | 1 if simulation produced yield > 0, else 0 |
+
+## How soil matching works
+
+For each location, the pipeline:
+1. Queries **SoilGrids v2.0** for sand/silt/clay percentages at that coordinate
+2. Classifies the texture class (USDA triangle)
+3. Scores all 22 local WOFOST soil files by how closely their AWC matches the SoilGrids AWC
+4. Falls back to **OpenLandMap** or neighboring pixels if SoilGrids returns null
+
+The local soil files (`soils/`) are CABO-format files used directly by WOFOST. Texture classes are mapped to preferred files via `TEXTURE_PRIORITY` in `providers/soil_matcher.py`.
+
+## Adding a new crop
+
+1. Place a WOFOST YAML file in `crops/` (e.g. `crops/lentil.yaml`)
+2. Create an agromanagement calendar in `agro/lentil_calendar.agro`
+3. The crop is automatically picked up on the next run
+
+The agro file must use `crop_name: lentil` and reference a variety that exists in the YAML. For winter crops (sown in autumn, harvested next year), ensure `crop_end_date` is in the following year — the pipeline handles multi-year weather data automatically.
+
+## External APIs
+
+| API | Purpose | Auth |
+|---|---|---|
+| OpenMeteo Archive | Daily + hourly weather | None |
+| OpenMeteo Elevation | Elevation per coordinate | None |
+| SoilGrids v2.0 REST | Sand/silt/clay per coordinate | None (rate-limited) |
+| OpenLandMap | Fallback soil texture | None |
+
+All API responses are cached in SQLite files inside `providers/` (`.cache.sqlite`, `.soilgrids_cache.sqlite`) to avoid repeated fetches on re-runs.
+
+SoilGrids allows roughly 5 requests/minute. The script includes a 13-second sleep between requests. If you see 429 errors, increase the sleep interval in `providers/soilgrids.py`.
+
+## Common issues
+
+| Problem | Fix |
+|---|---|
+| Crop not found | Check that crop name in `crops/*.yaml` matches the filename and the `.agro` file in `agro/` |
+| SoilGrids 429 errors | Increase sleep interval in `providers/soilgrids.py` or rely on the cache |
+| Weather data missing | The script fetches it automatically; check API connectivity if it fails |
+| Simulation very slow | Reduce `years` range or comment out crops in the valid pairs loop |
+| Winter crop TWSO = 0 | Ensure next-year weather is available; the pipeline pre-fetches it automatically |
+
+## License
+
+MIT — see LICENSE file.

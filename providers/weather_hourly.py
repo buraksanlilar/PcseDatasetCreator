@@ -8,7 +8,7 @@ import time
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 
-# 1. API İstemcisi ve Cache Yapılandırması
+# 1. API Client and Cache Configuration
 cache_session = requests_cache.CachedSession(os.path.join(script_dir, '.cache'), expire_after=-1)
 retry_session = retry(cache_session, retries=5, backoff_factor=0.2)
 openmeteo = openmeteo_requests.Client(session=retry_session)
@@ -18,7 +18,7 @@ def _extract_single_year(start_date, end_date):
     start_year = pd.to_datetime(start_date).year
     end_year = pd.to_datetime(end_date).year
     if start_year != end_year:
-        raise ValueError("start_date ve end_date ayni yil icinde olmalidir.")
+        raise ValueError("start_date and end_date must be within the same year.")
     return str(start_year)
 
 
@@ -36,7 +36,7 @@ def _request_hourly_with_retry(url, params, max_attempts=5, wait_seconds=65):
         except Exception as e:
             last_error = e
             if _is_rate_limit_error(e) and attempt < max_attempts:
-                print(f"Rate limit alindi. {wait_seconds} sn bekleniyor (deneme {attempt}/{max_attempts})...")
+                print(f"Rate limit reached. Waiting {wait_seconds}s (attempt {attempt}/{max_attempts})...")
                 time.sleep(wait_seconds)
                 continue
             raise
@@ -61,12 +61,12 @@ def _location_slug(location, index):
 
 def fetch_hourly_sensor_data(locations_source, start_date, end_date):
     if isinstance(locations_source, str) and not os.path.exists(locations_source):
-        print(f"Hata: {locations_source} bulunamadı.")
+        print(f"Error: {locations_source} not found.")
         return
 
     locations = _load_locations(locations_source)
 
-    # Çıktı klasörünü oluştur
+    # Create output directory
     year = _extract_single_year(start_date, end_date)
     output_dir = os.path.join(script_dir, "weather_data", "hourly", year)
     if not os.path.exists(output_dir):
@@ -79,15 +79,15 @@ def fetch_hourly_sensor_data(locations_source, start_date, end_date):
         file_path = os.path.join(output_dir, f"{safe_name}_hourly.csv")
 
         if os.path.exists(file_path):
-            print(f"Atlandi (cache): {safe_name}_hourly.csv")
+            print(f"Skipped (cache): {safe_name}_hourly.csv")
             continue
 
-        # Dakikalik API limitine takilmamak icin istekleri hafifce yay.
+        # Spread requests slightly to avoid hitting the per-minute API limit.
         if idx > 0:
             time.sleep(1.2)
-        
+
         label = loc.get("location_id", f"{loc['latitude']}, {loc['longitude']}")
-        print(f"Saatlik veriler çekiliyor: {label}...")
+        print(f"Fetching hourly data: {label}...")
 
         params = {
             "latitude": loc["latitude"],
@@ -95,11 +95,11 @@ def fetch_hourly_sensor_data(locations_source, start_date, end_date):
             "start_date": start_date,
             "end_date": end_date,
             "hourly": [
-                "temperature_2m",           # Hava Sıcaklığı (°C)
-                "relative_humidity_2m",    # Hava Nemi (%)
-                "precipitation",           # Yağış (mm)
-                "soil_temperature_0_to_7cm", # Toprak Sıcaklığı (°C)
-                "soil_moisture_0_to_7cm"    # Toprak Nemi (m³/m³)
+                "temperature_2m",           # Air Temperature (°C)
+                "relative_humidity_2m",    # Air Humidity (%)
+                "precipitation",           # Precipitation (mm)
+                "soil_temperature_0_to_7cm", # Soil Temperature (°C)
+                "soil_moisture_0_to_7cm"    # Soil Moisture (m³/m³)
             ],
             "timezone": "auto"
         }
@@ -111,7 +111,7 @@ def fetch_hourly_sensor_data(locations_source, start_date, end_date):
             response = _request_hourly_with_retry(url, params)
             hourly = response.Hourly()
 
-            # Zaman dizinini oluştur (UTC)
+            # Build time index (UTC)
             dates = pd.date_range(
                 start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
                 end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
@@ -119,7 +119,7 @@ def fetch_hourly_sensor_data(locations_source, start_date, end_date):
                 inclusive="left"
             )
 
-            # Verileri sözlük yapısına aktar
+            # Transfer data into dictionary structure
             data = {
                 "DATETIME": dates,
                 "AIR_TEMP": hourly.Variables(0).ValuesAsNumpy(),
@@ -131,17 +131,17 @@ def fetch_hourly_sensor_data(locations_source, start_date, end_date):
 
             df = pd.DataFrame(data)
             
-            # Eksik veri kontrolü ve temizliği
+            # Missing data check and cleanup
             df = df.ffill().bfill()
 
-            # CSV dosyasını ilgili klasöre kaydet
+            # Save CSV file to the relevant directory
             df.to_csv(file_path, index=False)
-            print(f"Basarili: {safe_name}_hourly.csv olusturuldu.")
-            
-        except Exception as e:
-            print(f"Hata: {label} verisi alınamadı. Detay: {e}")
+            print(f"Success: {safe_name}_hourly.csv created.")
 
-# --- ÇALIŞTIRMA ---
+        except Exception as e:
+            print(f"Error: could not retrieve data for {label}. Details: {e}")
+
+# --- RUN ---
 if __name__ == "__main__":
     fetch_hourly_sensor_data('districs_soil.json', '2024-01-01', '2024-12-31')
-    print("\nİşlem tamamlandı. Dosyalar 'weather_data/hourly' klasörüne kaydedildi.")
+    print("\nProcessing complete. Files saved to 'weather_data/hourly' directory.")

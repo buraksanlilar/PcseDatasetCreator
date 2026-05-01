@@ -15,7 +15,7 @@ from providers.elevation import fetch_batch_elevations
 from providers.soilgrids import fetch_batch_soil_features
 from providers.wav_provider import get_site_data
 
-# 1. Klasör yollarını belirle
+# 1. Define folder paths
 base_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(base_dir)
 
@@ -136,7 +136,7 @@ def choose_best_soil_file(sg_features):
 
     return best_soil_file, best_score, best_details
 
-# Bitki verilerini yükle
+# Load crop data
 cropd = YAMLCropDataProvider(fpath=crop_dir, force_reload=True)
 all_crops_varieties = cropd.get_crops_varieties()
 
@@ -165,8 +165,8 @@ def find_agro_file_for_crop(crop_name):
 
 
 def choose_valid_variety(crop_name, varieties):
-    # Bazı dosyalarda provider listesi içinde aktif edilemeyen değerler bulunabiliyor.
-    # Bu nedenle sırayla deneyip gerçekten set_active_crop kabul eden variety seçiliyor.
+    # Some files contain values in the provider list that cannot be activated.
+    # Therefore, varieties are tried in order and the first one accepted by set_active_crop is selected.
     for variety_name in sorted(list(varieties)):
         try:
             cropd.set_active_crop(crop_name, variety_name)
@@ -216,7 +216,7 @@ def build_grid_coordinates():
     ]
     skipped = len(latitudes) * len(longitudes) - len(coords)
     if skipped:
-        print(f"  [Kara maskesi] {skipped} deniz/göl noktası atlandı, {len(coords)} kara noktası kaldı.")
+        print(f"  [Land mask] {skipped} sea/lake points skipped, {len(coords)} land points remaining.")
     return coords
 
 
@@ -232,8 +232,8 @@ def build_random_coordinates():
         if is_land(lat, lon):
             coords.append({"latitude": lat, "longitude": lon})
     if len(coords) < RANDOM_LOCATION_COUNT:
-        print(f"  [Kara maskesi] Uyarı: {RANDOM_LOCATION_COUNT} kara noktası isteğine karşı "
-              f"yalnızca {len(coords)} bulunabildi ({max_attempts} denemede).")
+        print(f"  [Land mask] Warning: only {len(coords)} land points found out of "
+              f"{RANDOM_LOCATION_COUNT} requested ({max_attempts} attempts).")
     return coords
 
 
@@ -244,10 +244,10 @@ def build_locations():
         coordinates = build_grid_coordinates()
 
     if not coordinates:
-        raise RuntimeError("Koordinat listesi olusturulamadi.")
+        raise RuntimeError("Could not build coordinate list.")
 
     if not soil_files:
-        raise RuntimeError("Soil dosya listesi bos.")
+        raise RuntimeError("Soil file list is empty.")
 
     soil_features_list = fetch_batch_soil_features(coordinates)
 
@@ -291,9 +291,9 @@ def build_locations():
 site_columns = ["WAV", "SMLIM", "SSI", "SSMAX", "IFUNRN", "NOTINF"]
 
 WAV_SCENARIOS = {
-    "kuru":   10,    # cm — kuru başlangıç
-    "normal": 50,    # cm — normal başlangıç
-    "islak":  100,   # cm — ıslak başlangıç
+    "dry":    10,    # cm — dry start
+    "normal": 50,    # cm — normal start
+    "wet":    100,   # cm — wet start
 }
 
 
@@ -302,16 +302,16 @@ if __name__ == "__main__":
     all_merged_data = []
     years = list(range(2014, 2025))
 
-    # Sadece secilebilir variety olan crop'lari once filtreleyelim
+    # Filter crops that have at least one selectable variety
     valid_crop_variety_pairs = []
     for crop_name, varieties in all_crops_varieties.items():
         if not list(varieties):
-            print(f"Uyari: {crop_name} icin variety bulunamadi, atlaniyor.")
+            print(f"Warning: no variety found for {crop_name}, skipping.")
             continue
 
         variety_name = choose_valid_variety(crop_name, varieties)
         if variety_name is None:
-            print(f"Uyari: {crop_name} icin kullanilabilir variety bulunamadi, atlaniyor.")
+            print(f"Warning: no usable variety found for {crop_name}, skipping.")
             continue
 
         valid_crop_variety_pairs.append((crop_name, variety_name))
@@ -319,9 +319,9 @@ if __name__ == "__main__":
     total_combinations = len(years) * len(valid_crop_variety_pairs) * len(locations) * len(WAV_SCENARIOS)
     estimated_minutes = max(1, total_combinations // 12)
 
-    print(f"Toplam kombinasyon sayisi: {total_combinations}  "
-          f"({len(WAV_SCENARIOS)} WAV senaryosu: {list(WAV_SCENARIOS.keys())})")
-    print(f"Tahmini sure: yaklasik {estimated_minutes} dakika")
+    print(f"Total combinations: {total_combinations}  "
+          f"({len(WAV_SCENARIOS)} WAV scenarios: {list(WAV_SCENARIOS.keys())})")
+    print(f"Estimated time: approximately {estimated_minutes} minutes")
 
     progress_records = []
     error_records = []
@@ -341,7 +341,7 @@ if __name__ == "__main__":
             start_date = f"{year}-01-01"
             end_date = f"{year}-12-31"
 
-            # 2. O yilin hava verisini uret (cache mantigi daily/hourly icinde)
+            # 2. Fetch weather data for that year (caching handled inside daily/hourly)
             fetch_and_save_pcse_weather(locations, start_date, end_date)
             fetch_hourly_sensor_data(locations, start_date, end_date)
 
@@ -350,7 +350,7 @@ if __name__ == "__main__":
             for crop_name, variety_name in valid_crop_variety_pairs:
                 agro_file_path = find_agro_file_for_crop(crop_name)
                 if agro_file_path is None:
-                    print(f"Uyari: {crop_name} icin agro dosyasi bulunamadi, atlaniyor.")
+                    print(f"Warning: agro file not found for {crop_name}, skipping.")
                     for location in locations:
                         processed_counter += 1
                         pbar.update(1)
@@ -386,7 +386,7 @@ if __name__ == "__main__":
                     hourly_csv_path = os.path.join(hourly_weather_dir, str(year), f"{location_id}_hourly.csv")
                     daily_csv_path = os.path.join(daily_weather_dir, str(year), f"{location_id}.csv")
 
-                    # Eksik dosya kontrolü — WAV döngüsünden önce yap
+                    # Check for missing files — do this before the WAV loop
                     if not all(os.path.exists(p) for p in [soil_path, daily_csv_path, hourly_csv_path]):
                         for _ in WAV_SCENARIOS:
                             processed_counter += 1
@@ -399,7 +399,7 @@ if __name__ == "__main__":
                         })
                         continue
 
-                    # Toprak ve hava verisi — lokasyon başına bir kez yükle
+                    # Soil and weather data — load once per location
                     soild = CABOFileReader(soil_path)
                     if "RDMSOL" not in soild:
                         soild["RDMSOL"] = 150.0
@@ -435,7 +435,7 @@ if __name__ == "__main__":
                     df_hourly[time_column] = pd.to_datetime(df_hourly[time_column]).dt.tz_localize(None)
                     df_hourly["_merge_key"] = df_hourly[time_column].dt.normalize()
 
-                    # WAV senaryoları — toprak/hava verisi paylaşılır, sadece site değişir
+                    # WAV scenarios — soil/weather data is shared, only the site changes
                     for wav_scenario, wav_fraction in WAV_SCENARIOS.items():
                         processed_counter += 1
                         status = "ok"
@@ -487,7 +487,7 @@ if __name__ == "__main__":
                         merged_df["elevation"]    = location["elevation"]
                         for key in site_columns:
                             merged_df[key] = location.get(key)
-                        merged_df["WAV"]          = wav_fraction          # senaryo WAV'ını yaz
+                        merged_df["WAV"]          = wav_fraction          # write scenario WAV
                         merged_df["wav_scenario"] = wav_scenario
                         merged_df["crop_name"]    = crop_name
                         merged_df["variety_name"] = variety_name
@@ -508,26 +508,26 @@ if __name__ == "__main__":
                             pd.DataFrame(progress_records).to_csv(progress_file, index=False)
                             pd.DataFrame(error_records).to_csv(errors_file, index=False)
 
-            # 4. Yillik kayit
+            # 4. Yearly save
             if all_merged_data:
                 yearly_dataset = pd.concat(all_merged_data, ignore_index=True)
                 yearly_file = os.path.join(yearly_output_dir, f"pcse_{year}.csv")
                 yearly_dataset.to_csv(yearly_file, index=False)
                 all_yearly_paths.append(yearly_file)
-                print(f"Yillik dataset olusturuldu: {yearly_file}")
+                print(f"Yearly dataset created: {yearly_file}")
             else:
-                print(f"Uyari: {year} icin birlestirilecek veri yok.")
+                print(f"Warning: no data to merge for {year}.")
 
-    # Son progress/error kayitlari
+    # Final progress/error save
     pd.DataFrame(progress_records).to_csv(progress_file, index=False)
     pd.DataFrame(error_records).to_csv(errors_file, index=False)
 
-    # 5. Final cok yilli kayit
+    # 5. Final multi-year save
     if all_yearly_paths:
         frames = [pd.read_csv(path) for path in all_yearly_paths]
         final_dataset = pd.concat(frames, ignore_index=True)
         final_output_file = os.path.join(dataset_output_dir, "final_hourly_pcse_dataset_all_crops.csv")
         final_dataset.to_csv(final_output_file, index=False)
-        print(f"\nIslem tamamlandi. '{final_output_file}' olusturuldu.")
+        print(f"\nProcessing complete. '{final_output_file}' created.")
     else:
-        print("\nHicbir yilda veri birlestirilemedi.")
+        print("\nNo data could be merged for any year.")
