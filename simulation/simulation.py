@@ -18,8 +18,6 @@ parent_dir = os.path.dirname(base_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from providers.weather_daily import fetch_and_save_pcse_weather
-from providers.weather_hourly import fetch_hourly_sensor_data
 from providers.elevation import fetch_batch_elevations
 from providers.soil_matcher import load_soil_files, match_soil
 
@@ -150,7 +148,7 @@ def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
     y1_csv = os.path.join(daily_weather_dir, str(sim_year), f"{location_id}.csv")
 
     if crop_end_year == sim_year:
-        return CSVWeatherDataProvider(y1_csv, dateformat="%Y%m%d", delimiter=",")
+        return CSVWeatherDataProvider(y1_csv, dateformat="%Y%m%d", delimiter=",", force_reload=True)
 
     y2_csv = os.path.join(daily_weather_dir, str(crop_end_year), f"{location_id}.csv")
     if not os.path.exists(y2_csv):
@@ -178,7 +176,7 @@ def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
     tmp.writelines(data_rows)
     tmp.close()
     _tmp_files.append(tmp.name)
-    return CSVWeatherDataProvider(tmp.name, dateformat="%Y%m%d", delimiter=",")
+    return CSVWeatherDataProvider(tmp.name, dateformat="%Y%m%d", delimiter=",", force_reload=True)
 
 WAV_SCENARIOS = {
     "dry":    10,    # cm — dry start
@@ -298,19 +296,23 @@ if __name__ == "__main__":
           f"({len(WAV_SCENARIOS)} WAV scenarios: {list(WAV_SCENARIOS.keys())})")
     print(f"Estimated time: approximately {estimated_minutes} minutes")
 
-    all_yearly_paths = []
+    all_yearly_paths = [
+        os.path.join(yearly_output_dir, f"pcse_{y}.csv")
+        for y in years
+        if os.path.exists(os.path.join(yearly_output_dir, f"pcse_{y}.csv"))
+    ]
     progress_records = []
     error_records = []
     processed_counter = 0
 
     with tqdm(total=total_combinations, desc="Multiyear PCSE", unit="komb") as pbar:
         for year in years:
-            start_date = f"{year}-01-01"
-            end_date = f"{year}-12-31"
-
-            # 2. Fetch weather data for that year (caching handled inside daily/hourly)
-            fetch_and_save_pcse_weather(locations, start_date, end_date)
-            fetch_hourly_sensor_data(locations, start_date, end_date)
+            yearly_file = os.path.join(yearly_output_dir, f"pcse_{year}.csv")
+            if os.path.exists(yearly_file):
+                print(f"Skipping {year} — {yearly_file} already exists.")
+                all_yearly_paths.append(yearly_file)
+                pbar.update(len(valid_crop_variety_pairs) * len(locations) * len(WAV_SCENARIOS))
+                continue
 
             all_merged_data = []
 
@@ -351,13 +353,6 @@ if __name__ == "__main__":
                     crop_end_year = cc.get("crop_end_date").year if cc.get("crop_end_date") else year
                 except Exception:
                     crop_end_year = year
-
-                if crop_end_year > year:
-                    fetch_and_save_pcse_weather(
-                        locations,
-                        f"{crop_end_year}-01-01",
-                        f"{crop_end_year}-12-31",
-                    )
 
                 for location in locations:
                     location_id = location["location_id"]

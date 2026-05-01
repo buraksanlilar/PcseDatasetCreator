@@ -68,7 +68,7 @@ def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
 
     y2_csv = os.path.join(daily_weather_dir, str(crop_end_year), f"{location_id}.csv")
     if not os.path.exists(y2_csv):
-        raise FileNotFoundError(f"Sonraki yıl hava verisi yok: {y2_csv}")
+        raise FileNotFoundError(f"Next year weather data not found: {y2_csv}")
 
     header, data_rows = [], []
     for csv_path in (y1_csv, y2_csv):

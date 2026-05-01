@@ -255,7 +255,7 @@ def _fetch_soilgrids_texture(lat: float, lon: float) -> Dict[str, Dict[str, floa
                 label = _normalize_soilgrids_label(depth_info.get("label", ""))
                 raw   = depth_info.get("values", {}).get("mean")
                 if label in result and raw is not None:
-                    result[label][prop] = raw / divisor   # → yüzde
+                    result[label][prop] = raw / divisor   # → percentage
 
     return result
 
@@ -323,7 +323,7 @@ def _fetch_soilgrids_wp_rest(lat: float, lon: float) -> Dict[str, float]:
             if raw is not None:
                 result[label] = raw / 1000.0   # cm³/cm³ × 1000 → m³/m³
 
-    return result   # boş dict → PTF tetiklenir
+    return result   # empty dict → PTF triggered
 
 
 def _fetch_soilgrids_wp_package(lat: float, lon: float) -> Dict[str, float]:
@@ -353,29 +353,29 @@ def _fetch_soilgrids_wp_package(lat: float, lon: float) -> Dict[str, float]:
 
 def _fetch_soilgrids_wp(lat: float, lon: float, use_package: bool = True) -> Dict[str, float]:
     """
-    WP alma stratejisi (sırasıyla):
-      1. Nearest-neighbor ile geçerli SoilGrids koordinatını bul
-      2. wv1500 dene (REST veya package)
-      3. wv1500 null/boşsa → clay/sand/soc'tan Saxton-Rawls PTF
-      4. Hepsi başarısızsa → sabit fallback (0.10)
+    WP fetch strategy (in order):
+      1. Find valid SoilGrids coordinate via nearest-neighbor
+      2. Try wv1500 (REST or package)
+      3. If wv1500 null/empty → Saxton-Rawls PTF from clay/sand/soc
+      4. If all fail → constant fallback (0.10)
     """
-    # 1. Geçerli koordinatı bul (boşsa yakını ara)
+    # 1. Find valid coordinate (search neighbors if null)
     valid_lat, valid_lon = _find_nearest_valid_soilgrids(lat, lon)
 
-    # 2. wv1500 dene
+    # 2. Try wv1500
     if use_package:
         wp = _fetch_soilgrids_wp_package(valid_lat, valid_lon)
     else:
         wp = _fetch_soilgrids_wp_rest(valid_lat, valid_lon)
 
-    # Tüm katmanlar doluysa kullan
+    # Use if all layers populated
     if len(wp) == len(SOILGRIDS_DEPTHS):
-        logger.info("WP: wv1500'den alındı (%.4f, %.4f)", valid_lat, valid_lon)
+        logger.info("WP: obtained from wv1500 (%.4f, %.4f)", valid_lat, valid_lon)
         return wp
 
-    # 3. wv1500 yetersiz → Saxton-Rawls PTF
+    # 3. wv1500 insufficient → Saxton-Rawls PTF
     logger.info(
-        "wv1500 yetersiz (%d/%d katman), Saxton-Rawls PTF devreye giriyor",
+        "wv1500 insufficient (%d/%d layers), falling back to Saxton-Rawls PTF",
         len(wp), len(SOILGRIDS_DEPTHS),
     )
     texture = _fetch_soilgrids_texture(valid_lat, valid_lon)
@@ -393,16 +393,16 @@ def _fetch_soilgrids_wp(lat: float, lon: float, use_package: bool = True) -> Dic
             label, clay, sand, soc, wp_val,
         )
 
-    # 4. PTF de boşsa → sabit fallback
+    # 4. PTF also empty → constant fallback
     if not ptf_wp:
-        logger.warning("PTF de başarısız, sabit WP=0.10 kullanılıyor")
+        logger.warning("PTF also failed, using constant WP=0.10")
         return {label: 0.10 for label, *_ in SOILGRIDS_DEPTHS}
 
     return ptf_wp
 
 
 # ---------------------------------------------------------------------------
-# Profil & WAV hesabı
+# Profile & WAV computation
 # ---------------------------------------------------------------------------
 
 def _build_profile(
@@ -413,9 +413,9 @@ def _build_profile(
     fill_fraction: float = 0.7,
 ) -> tuple[list[float], list[float], list[float]]:
     """
-    Her santimetre için theta (m³/m³) ve theta_wp (m³/m³) dizilerini oluşturur.
+    Builds theta (m³/m³) and theta_wp (m³/m³) arrays for each centimetre of depth.
 
-    Open-Meteo 81 cm'de bitiyor; 81-100 cm arasını PTF tabanlı fallback ile dolduruyoruz.
+    Open-Meteo ends at 81 cm; 81-100 cm range is filled with PTF-based fallback.
     """
     theta    = [0.0] * max_depth_cm
     theta_wp = [0.0] * max_depth_cm
@@ -454,7 +454,7 @@ def _build_profile(
             if theta[cm] == 0.0:
                 theta[cm] = float(theta_init_layer)
 
-    # 81-100 cm: OM verisi yoksa PTF tabanlı başlangıç nemi kullan
+    # 81-100 cm: no OM data — use PTF-based initial moisture
     if last_valid_val is not None:
         for cm in range(81, max_depth_cm):
             if theta[cm] == 0.0:
@@ -462,7 +462,7 @@ def _build_profile(
 
     for cm in range(max_depth_cm):
         if theta[cm] == 0.0:
-            # OM tamamen eksikse güvenli fallback
+            # OM completely missing — safe fallback
             theta[cm] = theta_fc[cm] * fill_fraction if theta_fc[cm] > 0 else 0.20
 
     return theta, theta_wp, theta_fc
@@ -477,10 +477,10 @@ def _compute_wav(
     """
     WAV (cm) = Σ θ_i × Δz    [Δz = 1 cm]
 
-    Bu değer WOFOST/WOFOST72SiteDataProvider için başlangıç toprak su stoğu.
+    This value is the initial soil water storage for WOFOST/WOFOST72SiteDataProvider.
     """
     theta, theta_wp, theta_fc = _build_profile(om_moisture, sg_wp, sg_texture, max_depth_cm)
-    # WAV = water in excess of wilting point (cm) — WOFOST tanımı
+    # WAV = water in excess of wilting point (cm) — WOFOST definition
     wav = sum(max(0.0, theta[i] - theta_wp[i]) for i in range(max_depth_cm))
     return round(min(max(wav, 0.0), 100.0), 2)
 
@@ -496,7 +496,7 @@ def get_wav(
     use_soilgrids_package: bool = True,
     reference_date: str | None = None,
 ) -> float:
-    """Bir lokasyon için WAV (cm) döndürür."""
+    """Returns WAV (cm) for a given location."""
     om = _fetch_openmeteo(lat, lon, reference_date=reference_date)
     wp = _fetch_soilgrids_wp(lat, lon, use_package=use_soilgrids_package)
     texture = _fetch_soilgrids_texture(lat, lon)
@@ -525,7 +525,7 @@ def get_site_data(
     ifunrn: int = 0,
     notinf: float = 0.0,
 ) -> Dict[str, float | int]:
-    """PCSE-uyumlu site dict döndürür. WAV cm cinsinden float."""
+    """Returns a PCSE-compatible site dict. WAV is a float in cm."""
     wav_cm = get_wav(
         lat, lon,
         max_depth_cm=max_depth_cm,
@@ -565,6 +565,6 @@ def fetch_batch_wavs(
                 )
             )
         except Exception as exc:
-            logger.warning("WAV hesabı başarısız (%s,%s): %s", lat, lon, exc)
+            logger.warning("WAV computation failed (%s,%s): %s", lat, lon, exc)
             result.append(None)
     return result

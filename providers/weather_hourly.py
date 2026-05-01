@@ -22,9 +22,18 @@ def _extract_single_year(start_date, end_date):
     return str(start_year)
 
 
-def _is_rate_limit_error(error):
+class DailyLimitError(Exception):
+    """Raised when the OpenMeteo daily API request limit is exceeded."""
+
+
+def _is_daily_limit_error(error):
     message = str(error).lower()
-    return "request limit exceeded" in message or "please try again in one minute" in message
+    return "daily api request limit exceeded" in message or "please try again tomorrow" in message
+
+
+def _is_minute_limit_error(error):
+    message = str(error).lower()
+    return "please try again in one minute" in message
 
 
 def _request_hourly_with_retry(url, params, max_attempts=5, wait_seconds=65):
@@ -35,8 +44,10 @@ def _request_hourly_with_retry(url, params, max_attempts=5, wait_seconds=65):
             return responses[0]
         except Exception as e:
             last_error = e
-            if _is_rate_limit_error(e) and attempt < max_attempts:
-                print(f"Rate limit reached. Waiting {wait_seconds}s (attempt {attempt}/{max_attempts})...")
+            if _is_daily_limit_error(e):
+                raise DailyLimitError(str(e))
+            if _is_minute_limit_error(e) and attempt < max_attempts:
+                print(f"Per-minute limit reached. Waiting {wait_seconds}s (attempt {attempt}/{max_attempts})...")
                 time.sleep(wait_seconds)
                 continue
             raise
@@ -138,6 +149,10 @@ def fetch_hourly_sensor_data(locations_source, start_date, end_date):
             df.to_csv(file_path, index=False)
             print(f"Success: {safe_name}_hourly.csv created.")
 
+        except DailyLimitError:
+            print(f"\nDaily API limit reached. Stopping fetch — already-downloaded files are safe.")
+            print("Restart tomorrow and the script will continue from where it left off.")
+            return
         except Exception as e:
             print(f"Error: could not retrieve data for {label}. Details: {e}")
 

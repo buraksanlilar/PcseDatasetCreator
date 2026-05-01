@@ -27,10 +27,10 @@ def _request_elevation(params, max_attempts=5, wait_seconds=5):
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict) or "elevation" not in payload:
-            raise ValueError("Elevation API yanitinda elevation alani bulunamadi.")
+            raise ValueError("Elevation API response missing 'elevation' field.")
         return payload
 
-    raise RuntimeError("Elevation API istegi basarisiz oldu.")
+    raise RuntimeError("Elevation API request failed after all attempts.")
 
 
 def fetch_batch_elevations(locations_source, batch_size=100):
