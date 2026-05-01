@@ -13,10 +13,10 @@ parent_dir = os.path.dirname(base_dir)
 if parent_dir not in sys.path:
     sys.path.insert(0, parent_dir)
 
-from openmeteo.soilgrids import fetch_batch_soil_features, classify_texture
+from providers.soilgrids import fetch_batch_soil_features, classify_texture
 from pcse.input import CABOFileReader
 
-soil_dir = os.path.join(parent_dir, "soilTypes")
+soil_dir = os.path.join(parent_dir, "soils")
 
 def get_cabo_properties(soil_file_path):
     """
@@ -70,7 +70,7 @@ def main():
     
     # Import build_locations from theta_multiyear
     try:
-        from pcseData.theta_multiyear import build_locations
+        from simulation.simulation import build_locations
     except Exception as e:
         print(f"Error importing build_locations: {e}")
         return
@@ -172,7 +172,7 @@ def main():
     ]].head(10).to_string(index=False))
     
     # Save full report
-    report_output = os.path.join(parent_dir, "dataset_output", "soil_site_validation_report.csv")
+    report_output = os.path.join(parent_dir, "output", "soil_site_validation_report.csv")
     os.makedirs(os.path.dirname(report_output), exist_ok=True)
     df_report.to_csv(report_output, index=False)
     print(f"\nFull report saved to: {report_output}")

@@ -1,2 +1,6 @@
 pcseData/final_hourly_pcse_dataset_all_crops.csv
 *.csv
+
+# Local-only files
+CLAUDE.md
+memory/

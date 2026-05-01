@@ -68,7 +68,7 @@ def fetch_hourly_sensor_data(locations_source, start_date, end_date):
 
     # Çıktı klasörünü oluştur
     year = _extract_single_year(start_date, end_date)
-    output_dir = os.path.join(script_dir, "hourly_weather_data", year)
+    output_dir = os.path.join(script_dir, "weather_data", "hourly", year)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
@@ -144,4 +144,4 @@ def fetch_hourly_sensor_data(locations_source, start_date, end_date):
 # --- ÇALIŞTIRMA ---
 if __name__ == "__main__":
     fetch_hourly_sensor_data('districs_soil.json', '2024-01-01', '2024-12-31')
-    print("\nİşlem tamamlandı. Dosyalar 'hourly_weather_data' klasörüne kaydedildi.")
+    print("\nİşlem tamamlandı. Dosyalar 'weather_data/hourly' klasörüne kaydedildi.")

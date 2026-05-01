@@ -68,7 +68,7 @@ def fetch_and_save_pcse_weather(locations_source, start_date, end_date):
     locations = _load_locations(locations_source)
 
     year = _extract_single_year(start_date, end_date)
-    output_dir = os.path.join(script_dir, "pcse_weather_data", year)
+    output_dir = os.path.join(script_dir, "weather_data", "daily", year)
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 

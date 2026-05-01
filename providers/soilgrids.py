@@ -16,7 +16,7 @@ cache_session = requests_cache.CachedSession(
 )
 
 # SoilGrids REST API endpoint (official, stable)
-SOILGRIDS_URL = "https://rest.soilgrids.org/query"
+SOILGRIDS_URL = "https://rest.isric.org/soilgrids/v2.0/properties/query"
 
 # Soil texture classification (USDA)
 def classify_texture(sand_pct, silt_pct, clay_pct):
@@ -65,13 +65,15 @@ def _request_soilgrids_single(lat, lon, max_attempts=2, wait_seconds=1):
     params = {
         "lat": float(lat),
         "lon": float(lon),
-        "property": ["sand", "silt", "clay", "awc", "bdod"],
+        # SoilGrids expects comma-separated property list
+        "property": ",".join(["sand", "silt", "clay", "awc", "bdod"]),
         "depth": "0-5cm"  # Use top layer for speed
     }
     
     for attempt in range(1, max_attempts + 1):
         try:
-            response = cache_session.get(url, params=params, timeout=15)
+            headers = {"Accept": "application/json"}
+            response = cache_session.get(url, params=params, headers=headers, timeout=5)
             if response.status_code == 429 and attempt < max_attempts:
                 # Rate limited, retry after wait
                 time.sleep(wait_seconds * attempt)
@@ -82,15 +84,20 @@ def _request_soilgrids_single(lat, lon, max_attempts=2, wait_seconds=1):
                     time.sleep(wait_seconds * attempt)
                     continue
             response.raise_for_status()
-            return response.json()
+            try:
+                return response.json()
+            except ValueError:
+                # Invalid JSON
+                return None
         except requests.exceptions.ConnectionError as e:
             # Network issue
+            print(f"SoilGrids connection error: {e}")
             if attempt < max_attempts:
                 time.sleep(wait_seconds * attempt)
                 continue
             return None  # Tolerate and return None (fallback in caller)
         except Exception as e:
-            # Other errors
+            print(f"SoilGrids request error: {e}")
             return None
     return None
 

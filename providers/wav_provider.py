@@ -480,7 +480,8 @@ def _compute_wav(
     Bu değer WOFOST/WOFOST72SiteDataProvider için başlangıç toprak su stoğu.
     """
     theta, theta_wp, theta_fc = _build_profile(om_moisture, sg_wp, sg_texture, max_depth_cm)
-    wav = sum(max(0.0, theta[i]) for i in range(max_depth_cm))
+    # WAV = water in excess of wilting point (cm) — WOFOST tanımı
+    wav = sum(max(0.0, theta[i] - theta_wp[i]) for i in range(max_depth_cm))
     return round(min(max(wav, 0.0), 100.0), 2)
 
 
