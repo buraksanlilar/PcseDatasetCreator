@@ -40,8 +40,7 @@ def _request_hourly_with_retry(url, params, max_attempts=5, wait_seconds=65):
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
-            responses = openmeteo.weather_api(url, params=params)
-            return responses[0]
+            return openmeteo.weather_api(url, params=params)
         except Exception as e:
             last_error = e
             if _is_daily_limit_error(e):
@@ -85,44 +84,53 @@ def fetch_hourly_sensor_data(locations_source, start_date, end_date):
 
     url = "https://archive-api.open-meteo.com/v1/archive"
 
+    pending = [
+        (idx, loc) for idx, loc in enumerate(locations)
+        if not os.path.exists(os.path.join(output_dir, f"{_location_slug(loc, idx)}_hourly.csv"))
+    ]
+
     for idx, loc in enumerate(locations):
         safe_name = _location_slug(loc, idx)
         file_path = os.path.join(output_dir, f"{safe_name}_hourly.csv")
-
         if os.path.exists(file_path):
             print(f"Skipped (cache): {safe_name}_hourly.csv")
-            continue
 
-        # Spread requests slightly to avoid hitting the per-minute API limit.
-        if idx > 0:
-            time.sleep(1.2)
+    if not pending:
+        return
 
-        label = loc.get("location_id", f"{loc['latitude']}, {loc['longitude']}")
-        print(f"Fetching hourly data: {label}...")
+    print(f"Fetching hourly weather for {len(pending)} locations in one batch request...")
 
-        params = {
-            "latitude": loc["latitude"],
-            "longitude": loc["longitude"],
-            "start_date": start_date,
-            "end_date": end_date,
-            "hourly": [
-                "temperature_2m",           # Air Temperature (°C)
-                "relative_humidity_2m",    # Air Humidity (%)
-                "precipitation",           # Precipitation (mm)
-                "soil_temperature_0_to_7cm", # Soil Temperature (°C)
-                "soil_moisture_0_to_7cm"    # Soil Moisture (m³/m³)
-            ],
-            "timezone": "auto"
-        }
+    params = {
+        "latitude":  [loc["latitude"]  for _, loc in pending],
+        "longitude": [loc["longitude"] for _, loc in pending],
+        "start_date": start_date,
+        "end_date": end_date,
+        "hourly": [
+            "temperature_2m",
+            "relative_humidity_2m",
+            "precipitation",
+            "soil_temperature_0_to_7cm",
+            "soil_moisture_0_to_7cm"
+        ],
+        "timezone": "auto"
+    }
 
-        if loc.get("elevation") is not None:
-            params["elevation"] = loc["elevation"]
+    try:
+        responses = _request_hourly_with_retry(url, params)
+    except DailyLimitError:
+        print(f"\nDaily API limit reached. Stopping fetch — already-downloaded files are safe.")
+        print("Restart tomorrow and the script will continue from where it left off.")
+        return
+    except Exception as e:
+        print(f"Batch request failed: {e}")
+        return
 
+    for response, (idx, loc) in zip(responses, pending):
+        safe_name = _location_slug(loc, idx)
+        file_path = os.path.join(output_dir, f"{safe_name}_hourly.csv")
         try:
-            response = _request_hourly_with_retry(url, params)
             hourly = response.Hourly()
 
-            # Build time index (UTC)
             dates = pd.date_range(
                 start=pd.to_datetime(hourly.Time(), unit="s", utc=True),
                 end=pd.to_datetime(hourly.TimeEnd(), unit="s", utc=True),
@@ -130,31 +138,20 @@ def fetch_hourly_sensor_data(locations_source, start_date, end_date):
                 inclusive="left"
             )
 
-            # Transfer data into dictionary structure
             data = {
-                "DATETIME": dates,
-                "AIR_TEMP": hourly.Variables(0).ValuesAsNumpy(),
-                "AIR_HUMIDITY": hourly.Variables(1).ValuesAsNumpy(),
-                "PRECIP": hourly.Variables(2).ValuesAsNumpy(),
-                "SOIL_TEMP_0_7": hourly.Variables(3).ValuesAsNumpy(),
+                "DATETIME":        dates,
+                "AIR_TEMP":        hourly.Variables(0).ValuesAsNumpy(),
+                "AIR_HUMIDITY":    hourly.Variables(1).ValuesAsNumpy(),
+                "PRECIP":          hourly.Variables(2).ValuesAsNumpy(),
+                "SOIL_TEMP_0_7":   hourly.Variables(3).ValuesAsNumpy(),
                 "SOIL_MOISTURE_0_7": hourly.Variables(4).ValuesAsNumpy()
             }
 
-            df = pd.DataFrame(data)
-            
-            # Missing data check and cleanup
-            df = df.ffill().bfill()
-
-            # Save CSV file to the relevant directory
+            df = pd.DataFrame(data).ffill().bfill()
             df.to_csv(file_path, index=False)
             print(f"Success: {safe_name}_hourly.csv created.")
-
-        except DailyLimitError:
-            print(f"\nDaily API limit reached. Stopping fetch — already-downloaded files are safe.")
-            print("Restart tomorrow and the script will continue from where it left off.")
-            return
         except Exception as e:
-            print(f"Error: could not retrieve data for {label}. Details: {e}")
+            print(f"Error processing {safe_name}: {e}")
 
 # --- RUN ---
 if __name__ == "__main__":

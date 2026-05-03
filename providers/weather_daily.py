@@ -41,8 +41,7 @@ def _request_daily_with_retry(url, params, max_attempts=5, wait_seconds=65):
     last_error = None
     for attempt in range(1, max_attempts + 1):
         try:
-            responses = openmeteo.weather_api(url, params=params)
-            return responses[0]
+            return openmeteo.weather_api(url, params=params)
         except Exception as e:
             last_error = e
             if _is_daily_limit_error(e):
@@ -85,43 +84,53 @@ def fetch_and_save_pcse_weather(locations_source, start_date, end_date):
 
     url = "https://archive-api.open-meteo.com/v1/archive"
 
+    pending = [
+        (idx, loc) for idx, loc in enumerate(locations)
+        if not os.path.exists(os.path.join(output_dir, f"{_location_slug(loc, idx)}.csv"))
+    ]
+
     for idx, loc in enumerate(locations):
         safe_name = _location_slug(loc, idx)
         file_path = os.path.join(output_dir, f"{safe_name}.csv")
-
         if os.path.exists(file_path):
             print(f"Skipped (cache): {safe_name}.csv")
-            continue
 
-        # Spread requests slightly to avoid hitting the per-minute API limit.
-        if idx > 0:
-            time.sleep(1.2)
+    if not pending:
+        return
 
-        label = loc.get("location_id", f"{loc['latitude']}, {loc['longitude']}")
-        print(f"Fetching data: {label}...")
+    print(f"Fetching daily weather for {len(pending)} locations in one batch request...")
 
-        params = {
-            "latitude": loc["latitude"],
-            "longitude": loc["longitude"],
-            "start_date": start_date,
-            "end_date": end_date,
-            "daily": [
-                "temperature_2m_max", 
-                "temperature_2m_min", 
-                "shortwave_radiation_sum", 
-                "precipitation_sum", 
-                "wind_speed_10m_max", 
-                "dewpoint_2m_mean"
-            ],
-            "timezone": "auto",
-            "wind_speed_unit": "ms"
-        }
+    params = {
+        "latitude":  [loc["latitude"]  for _, loc in pending],
+        "longitude": [loc["longitude"] for _, loc in pending],
+        "start_date": start_date,
+        "end_date": end_date,
+        "daily": [
+            "temperature_2m_max",
+            "temperature_2m_min",
+            "shortwave_radiation_sum",
+            "precipitation_sum",
+            "wind_speed_10m_max",
+            "dewpoint_2m_mean"
+        ],
+        "timezone": "auto",
+        "wind_speed_unit": "ms"
+    }
 
-        if loc.get("elevation") is not None:
-            params["elevation"] = loc["elevation"]
+    try:
+        responses = _request_daily_with_retry(url, params)
+    except DailyLimitError:
+        print(f"\nDaily API limit reached. Stopping fetch — already-downloaded files are safe.")
+        print("Restart tomorrow and the script will continue from where it left off.")
+        return
+    except Exception as e:
+        print(f"Batch request failed: {e}")
+        return
 
+    for response, (idx, loc) in zip(responses, pending):
+        safe_name = _location_slug(loc, idx)
+        file_path = os.path.join(output_dir, f"{safe_name}.csv")
         try:
-            response = _request_daily_with_retry(url, params)
             daily = response.Daily()
 
             dates = pd.date_range(
@@ -131,45 +140,32 @@ def fetch_and_save_pcse_weather(locations_source, start_date, end_date):
                 inclusive="left"
             ).date
 
-            tmax = daily.Variables(0).ValuesAsNumpy()
-            tmin = daily.Variables(1).ValuesAsNumpy()
+            tmax  = daily.Variables(0).ValuesAsNumpy()
+            tmin  = daily.Variables(1).ValuesAsNumpy()
             irrad_mj = daily.Variables(2).ValuesAsNumpy()
             precip = daily.Variables(3).ValuesAsNumpy()
-            wind = daily.Variables(4).ValuesAsNumpy()
-            tdew = daily.Variables(5).ValuesAsNumpy()
+            wind  = daily.Variables(4).ValuesAsNumpy()
+            tdew  = daily.Variables(5).ValuesAsNumpy()
 
-            # --- PCSE / WOFOST Conversions ---
-
-            # 1. VAP (Vapour Pressure) calculation: in hPa (Tetens formula)
-            # tdew is in degrees Celsius.
             vap_hpa = 6.1078 * np.exp((17.27 * tdew) / (tdew + 237.3))
-
-            # 2. VAP safety clipping:
-            # PCSE upper limit is 199.3 but values above 50 hPa are meteorological errors.
-            # We clip to between 0.6 hPa (very dry) and 50.0 hPa (very humid/hot).
-            vap_kpa = vap_hpa / 10  # hPa -> kPa
-
-            # 3. IRRAD (MJ/m2 -> kJ/m2)
+            vap_kpa = vap_hpa / 10
             irrad_kj = np.maximum(0, irrad_mj * 1000)
 
             data = {
-                "DAY": pd.to_datetime(dates).strftime('%Y%m%d'),
-                "IRRAD": irrad_kj.astype(float),
-                "TMIN": tmin.astype(float),
-                "TMAX": tmax.astype(float),
-                "VAP": vap_kpa.astype(float), # Now in hPa and clipped
-                "WIND": wind.astype(float),
-                "RAIN": precip.astype(float),
-                "SNOWDEPTH": 0.0 
+                "DAY":       pd.to_datetime(dates).strftime('%Y%m%d'),
+                "IRRAD":     irrad_kj.astype(float),
+                "TMIN":      tmin.astype(float),
+                "TMAX":      tmax.astype(float),
+                "VAP":       vap_kpa.astype(float),
+                "WIND":      wind.astype(float),
+                "RAIN":      precip.astype(float),
+                "SNOWDEPTH": 0.0
             }
 
             df = pd.DataFrame(data).ffill().bfill()
 
-            elevation = loc.get("elevation")
-            if elevation is None:
-                elevation = response.Elevation() if response.Elevation() is not None else 100.0
+            elevation = loc.get("elevation") or response.Elevation() or 100.0
 
-            # WRITE FILE
             with open(file_path, 'w', encoding='utf-8', newline='') as f_out:
                 f_out.write("## Site Characteristics\n")
                 f_out.write("Country='Turkey'\n")
@@ -184,17 +180,11 @@ def fetch_and_save_pcse_weather(locations_source, start_date, end_date):
                 f_out.write("AngstromB=0.55\n")
                 f_out.write("HasSunshine=False\n")
                 f_out.write("## Daily weather observations\n")
-                
                 df.to_csv(f_out, index=False, header=True, float_format='%.2f')
-            
-            print(f"Success: {safe_name}.csv created.")
 
-        except DailyLimitError:
-            print(f"\nDaily API limit reached. Stopping fetch — already-downloaded files are safe.")
-            print("Restart tomorrow and the script will continue from where it left off.")
-            return
+            print(f"Success: {safe_name}.csv created.")
         except Exception as e:
-            print(f"Error occurred ({label}): {e}")
+            print(f"Error processing {safe_name}: {e}")
 
 # --- START PROCESS ---
 if __name__ == "__main__":

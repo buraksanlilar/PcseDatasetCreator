@@ -297,9 +297,9 @@ if __name__ == "__main__":
     print(f"Estimated time: approximately {estimated_minutes} minutes")
 
     all_yearly_paths = [
-        os.path.join(yearly_output_dir, f"pcse_{y}.csv")
+        os.path.join(yearly_output_dir, f"pcse_{y}.parquet")
         for y in years
-        if os.path.exists(os.path.join(yearly_output_dir, f"pcse_{y}.csv"))
+        if os.path.exists(os.path.join(yearly_output_dir, f"pcse_{y}.parquet"))
     ]
     progress_records = []
     error_records = []
@@ -307,7 +307,7 @@ if __name__ == "__main__":
 
     with tqdm(total=total_combinations, desc="Multiyear PCSE", unit="komb") as pbar:
         for year in years:
-            yearly_file = os.path.join(yearly_output_dir, f"pcse_{year}.csv")
+            yearly_file = os.path.join(yearly_output_dir, f"pcse_{year}.parquet")
             if os.path.exists(yearly_file):
                 print(f"Skipping {year} — {yearly_file} already exists.")
                 all_yearly_paths.append(yearly_file)
@@ -479,7 +479,6 @@ if __name__ == "__main__":
                         merged_df["crop_name"]    = crop_name
                         merged_df["variety_name"] = variety_name
                         merged_df["year"]         = year
-                        merged_df["season_id"]    = f"{location_id}_{crop_name}_{variety_name}_{year}_{wav_scenario}"
                         merged_df["harvest_twso"] = harvest_twso        # constant harvest yield across the season
                         merged_df["sim_success"]  = int(harvest_twso > 0)
                         merged_df["TWSO"]         = merged_df["TWSO"].fillna(0)  # daily growth state
@@ -501,8 +500,8 @@ if __name__ == "__main__":
             # 4. Yearly save
             if all_merged_data:
                 yearly_dataset = pd.concat(all_merged_data, ignore_index=True)
-                yearly_file = os.path.join(yearly_output_dir, f"pcse_{year}.csv")
-                yearly_dataset.to_csv(yearly_file, index=False)
+                yearly_file = os.path.join(yearly_output_dir, f"pcse_{year}.parquet")
+                yearly_dataset.to_parquet(yearly_file, index=False)
                 all_yearly_paths.append(yearly_file)
                 print(f"Yearly dataset created: {yearly_file}")
             else:
@@ -521,10 +520,10 @@ if __name__ == "__main__":
 
     # 5. Final multi-year save
     if all_yearly_paths:
-        frames = [pd.read_csv(path) for path in all_yearly_paths]
+        frames = [pd.read_parquet(path) for path in all_yearly_paths]
         final_dataset = pd.concat(frames, ignore_index=True)
-        final_output_file = os.path.join(dataset_output_dir, "final_hourly_pcse_dataset_multiyear.csv")
-        final_dataset.to_csv(final_output_file, index=False)
+        final_output_file = os.path.join(dataset_output_dir, "final_hourly_pcse_dataset_multiyear.parquet")
+        final_dataset.to_parquet(final_output_file, index=False)
         print(f"\nProcessing complete. '{final_output_file}' created.")
     else:
         print("\nNo data could be merged for any year.")
