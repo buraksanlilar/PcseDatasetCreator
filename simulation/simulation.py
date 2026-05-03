@@ -4,7 +4,7 @@ import random
 import sys
 import tempfile
 import pandas as pd
-from tqdm import tqdm
+from concurrent.futures import ProcessPoolExecutor
 from global_land_mask import globe
 
 from pcse.input import YAMLCropDataProvider, CABOFileReader, YAMLAgroManagementReader, WOFOST72SiteDataProvider, CSVWeatherDataProvider
@@ -32,8 +32,8 @@ dataset_output_dir = os.path.join(parent_dir, "output")
 yearly_output_dir = os.path.join(dataset_output_dir, "yearly")
 os.makedirs(yearly_output_dir, exist_ok=True)
 
-progress_file = os.path.join(dataset_output_dir, "progress_multiyear.csv")
-errors_file = os.path.join(dataset_output_dir, "errors_multiyear.csv")
+progress_file = os.path.join(dataset_output_dir, "progress_multiyear.parquet")
+errors_file = os.path.join(dataset_output_dir, "errors_multiyear.parquet")
 
 # Load crop data
 cropd = YAMLCropDataProvider(fpath=crop_dir, force_reload=True)
@@ -45,7 +45,7 @@ available_agro_files = {
     if f.endswith(".agro")
 }
 
-# --- Coordinate based locations (replace district dependency) ---
+# --- Coordinate based locations ---
 LOCATION_MODE = "grid"
 GRID_LAT_MIN = 36.0
 GRID_LAT_MAX = 42.0
@@ -56,6 +56,7 @@ GRID_LON_STEP = 1.5
 RANDOM_LOCATION_COUNT = 24
 RANDOM_SEED = 42
 
+PARALLEL_WORKERS = max(1, (os.cpu_count() or 1) - 1)
 
 
 def is_land(lat: float, lon: float) -> bool:
@@ -136,25 +137,22 @@ def build_locations():
 
     return locations
 
-_tmp_files: list[str] = []
-
 
 def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
-    """Returns a CSVWeatherDataProvider merging one or two years of data.
+    """Returns (CSVWeatherDataProvider, tmp_path_or_None).
 
-    Winter crops (wheat, barley, etc.) are sown in sim_year and harvested in
-    crop_end_year. WOFOST needs weather data from both years.
+    Winter crops need data from two years merged into a temp file.
+    Caller is responsible for deleting tmp_path when done.
     """
     y1_csv = os.path.join(daily_weather_dir, str(sim_year), f"{location_id}.csv")
 
     if crop_end_year == sim_year:
-        return CSVWeatherDataProvider(y1_csv, dateformat="%Y%m%d", delimiter=",", force_reload=True)
+        return CSVWeatherDataProvider(y1_csv, dateformat="%Y%m%d", delimiter=",", force_reload=True), None
 
     y2_csv = os.path.join(daily_weather_dir, str(crop_end_year), f"{location_id}.csv")
     if not os.path.exists(y2_csv):
         raise FileNotFoundError(f"Next-year weather data not found: {y2_csv}")
 
-    # Take header rows from year 1, merge data rows from both years
     header, data_rows = [], []
     for csv_path in (y1_csv, y2_csv):
         is_first = csv_path == y1_csv
@@ -165,9 +163,9 @@ def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
                     if line.startswith("DAY,"):
                         past_header = True
                         if is_first:
-                            header.append(line)   # add column header
+                            header.append(line)
                     elif is_first:
-                        header.append(line)       # add site characteristics
+                        header.append(line)
                 else:
                     data_rows.append(line)
 
@@ -175,16 +173,14 @@ def _make_daily_wdp(location_id: str, sim_year: int, crop_end_year: int):
     tmp.writelines(header)
     tmp.writelines(data_rows)
     tmp.close()
-    _tmp_files.append(tmp.name)
-    return CSVWeatherDataProvider(tmp.name, dateformat="%Y%m%d", delimiter=",", force_reload=True)
+    return CSVWeatherDataProvider(tmp.name, dateformat="%Y%m%d", delimiter=",", force_reload=True), tmp.name
+
 
 WAV_SCENARIOS = {
-    "dry":    10,    # cm — dry start
-    "normal": 50,    # cm — normal start
-    "wet":    100,   # cm — wet start
+    "dry":    10,
+    "normal": 50,
+    "wet":    100,
 }
-
-# ---------------------------------------------------------------
 
 
 def normalize_name(value):
@@ -205,8 +201,6 @@ def find_agro_file_for_crop(crop_name):
 
 
 def choose_valid_variety(crop_name, varieties):
-    # Some files contain values in the provider list that cannot be activated.
-    # Therefore, varieties are tried in order and the first one accepted by set_active_crop is selected.
     for variety_name in sorted(list(varieties)):
         try:
             cropd.set_active_crop(crop_name, variety_name)
@@ -240,7 +234,6 @@ def patch_agromanagement_for_year(agromanagement, crop_name, variety_name, year)
             if crop_calendar.get("crop_end_date"):
                 end = _shift_date_to_year(crop_calendar["crop_end_date"], year).date()
                 start = crop_calendar["crop_start_date"]
-                # Winter crops (wheat, barley, etc.) cross the year boundary: harvest moves to next year
                 if start and end <= start:
                     end = _shift_date_to_year(crop_calendar["crop_end_date"], year + 1).date()
                 crop_calendar["crop_end_date"] = end
@@ -271,259 +264,215 @@ def patch_agromanagement_for_year(agromanagement, crop_name, variety_name, year)
     return updated
 
 
-if __name__ == "__main__":
-    years = list(range(2014, 2025))
+def _simulate_year(args):
+    year, locations, valid_crop_variety_pairs = args
 
-    # Filter crops that have at least one selectable variety
-    valid_crop_variety_pairs = []
-    for crop_name, varieties in all_crops_varieties.items():
-        if not list(varieties):
-            print(f"Warning: no variety found for {crop_name}, skipping.")
-            continue
+    yearly_file = os.path.join(yearly_output_dir, f"pcse_{year}.parquet")
+    if os.path.exists(yearly_file):
+        print(f"[{year}] Skipping — already exists.")
+        return yearly_file
 
-        variety_name = choose_valid_variety(crop_name, varieties)
-        if variety_name is None:
-            print(f"Warning: no usable variety found for {crop_name}, skipping.")
-            continue
+    print(f"[{year}] Starting simulation...")
 
-        valid_crop_variety_pairs.append((crop_name, variety_name))
-
-    locations = build_locations()
-    total_combinations = len(years) * len(valid_crop_variety_pairs) * len(locations) * len(WAV_SCENARIOS)
-    estimated_minutes = max(1, total_combinations // 12)
-
-    print(f"Total combinations: {total_combinations}  "
-          f"({len(WAV_SCENARIOS)} WAV scenarios: {list(WAV_SCENARIOS.keys())})")
-    print(f"Estimated time: approximately {estimated_minutes} minutes")
-
-    all_yearly_paths = [
-        os.path.join(yearly_output_dir, f"pcse_{y}.parquet")
-        for y in years
-        if os.path.exists(os.path.join(yearly_output_dir, f"pcse_{y}.parquet"))
-    ]
+    all_merged_data = []
     progress_records = []
     error_records = []
-    processed_counter = 0
+    tmp_files = []
 
-    with tqdm(total=total_combinations, desc="Multiyear PCSE", unit="komb") as pbar:
-        for year in years:
-            yearly_file = os.path.join(yearly_output_dir, f"pcse_{year}.parquet")
-            if os.path.exists(yearly_file):
-                print(f"Skipping {year} — {yearly_file} already exists.")
-                all_yearly_paths.append(yearly_file)
-                pbar.update(len(valid_crop_variety_pairs) * len(locations) * len(WAV_SCENARIOS))
+    for crop_name, variety_name in valid_crop_variety_pairs:
+        agro_file_path = find_agro_file_for_crop(crop_name)
+        if agro_file_path is None:
+            for location in locations:
+                progress_records.append({
+                    "year": year, "location_id": location["location_id"],
+                    "latitude": location["latitude"], "longitude": location["longitude"],
+                    "crop": crop_name, "variety": variety_name, "status": "agro_file_missing"
+                })
+                error_records.append({
+                    "year": year, "location_id": location["location_id"],
+                    "latitude": location["latitude"], "longitude": location["longitude"],
+                    "crop": crop_name, "variety": variety_name, "error": "agro_file_missing"
+                })
+            continue
+
+        agromanagement_raw = YAMLAgroManagementReader(agro_file_path)
+        agromanagement = patch_agromanagement_for_year(agromanagement_raw, crop_name, variety_name, year)
+
+        try:
+            last_camp = agromanagement[-1]
+            cc = last_camp[next(iter(last_camp))].get("CropCalendar") or {}
+            crop_end_year = cc.get("crop_end_date").year if cc.get("crop_end_date") else year
+        except Exception:
+            crop_end_year = year
+
+        for location in locations:
+            location_id = location["location_id"]
+            soil_path = os.path.join(soil_dir, location["soil_file"])
+            hourly_csv_path = os.path.join(hourly_weather_dir, str(year), f"{location_id}_hourly.csv")
+            daily_csv_path = os.path.join(daily_weather_dir, str(year), f"{location_id}.csv")
+
+            if not all(os.path.exists(p) for p in [soil_path, daily_csv_path, hourly_csv_path]):
+                error_records.append({
+                    "year": year, "location_id": location_id,
+                    "latitude": location["latitude"], "longitude": location["longitude"],
+                    "crop": crop_name, "variety": variety_name, "error": "missing_input_file"
+                })
                 continue
 
-            all_merged_data = []
+            soild = CABOFileReader(soil_path)
+            if "RDMSOL" not in soild:
+                soild["RDMSOL"] = 150.0
 
-            for crop_name, variety_name in valid_crop_variety_pairs:
-                agro_file_path = find_agro_file_for_crop(crop_name)
-                if agro_file_path is None:
-                    print(f"Warning: agro file not found for {crop_name}, skipping.")
-                    for location in locations:
-                        processed_counter += 1
-                        pbar.update(1)
-                        progress_records.append({
-                            "year": year,
-                            "location_id": location["location_id"],
-                            "latitude": location["latitude"],
-                            "longitude": location["longitude"],
-                            "crop": crop_name,
-                            "variety": variety_name,
-                            "status": "agro_file_missing"
-                        })
-                        error_records.append({
-                            "year": year,
-                            "location_id": location["location_id"],
-                            "latitude": location["latitude"],
-                            "longitude": location["longitude"],
-                            "crop": crop_name,
-                            "variety": variety_name,
-                            "error": "agro_file_missing"
-                        })
+            try:
+                wdp, tmp_path = _make_daily_wdp(location_id, year, crop_end_year)
+                if tmp_path:
+                    tmp_files.append(tmp_path)
+            except Exception as e:
+                error_records.append({
+                    "year": year, "location_id": location_id,
+                    "latitude": location["latitude"], "longitude": location["longitude"],
+                    "crop": crop_name, "variety": variety_name, "error": str(e)
+                })
+                continue
+
+            df_hourly = pd.read_csv(hourly_csv_path)
+            if "DATETIME" not in df_hourly.columns:
+                error_records.append({
+                    "year": year, "location_id": location_id,
+                    "latitude": location["latitude"], "longitude": location["longitude"],
+                    "crop": crop_name, "variety": variety_name, "error": "DATETIME_missing"
+                })
+                continue
+
+            df_hourly["DATETIME"] = pd.to_datetime(df_hourly["DATETIME"]).dt.tz_localize(None)
+            df_hourly["_merge_key"] = df_hourly["DATETIME"].dt.normalize()
+
+            for wav_scenario, wav_fraction in WAV_SCENARIOS.items():
+                sited = WOFOST72SiteDataProvider(WAV=wav_fraction)
+                params = ParameterProvider(cropdata=cropd, soildata=soild, sitedata=sited)
+
+                try:
+                    wofost = Wofost72_WLP_CWB(params, wdp, agromanagement)
+                    wofost.run_till_terminate()
+                except Exception as e:
+                    error_records.append({
+                        "year": year, "location_id": location_id,
+                        "latitude": location["latitude"], "longitude": location["longitude"],
+                        "crop": crop_name, "variety": variety_name,
+                        "wav_scenario": wav_scenario, "wav_fraction": wav_fraction,
+                        "error": str(e)
+                    })
                     continue
 
-                agromanagement_raw = YAMLAgroManagementReader(agro_file_path)
-                agromanagement = patch_agromanagement_for_year(agromanagement_raw, crop_name, variety_name, year)
+                output = wofost.get_output()
+                df_pcse = pd.DataFrame(output)
+                if df_pcse.empty:
+                    error_records.append({
+                        "year": year, "location_id": location_id,
+                        "latitude": location["latitude"], "longitude": location["longitude"],
+                        "crop": crop_name, "variety": variety_name,
+                        "wav_scenario": wav_scenario, "wav_fraction": wav_fraction,
+                        "error": "empty_simulation_output"
+                    })
+                    continue
 
-                # For winter crops the harvest may move to the next year — fetch that year's weather in advance
-                try:
-                    last_camp = agromanagement[-1]
-                    cc = last_camp[next(iter(last_camp))].get("CropCalendar") or {}
-                    crop_end_year = cc.get("crop_end_date").year if cc.get("crop_end_date") else year
-                except Exception:
-                    crop_end_year = year
+                twso_series = df_pcse["TWSO"].dropna() if "TWSO" in df_pcse.columns else pd.Series([], dtype=float)
+                harvest_twso = float(twso_series.iloc[-1]) if not twso_series.empty else 0.0
 
-                for location in locations:
-                    location_id = location["location_id"]
-                    soil_file_name = location["soil_file"]
-                    soil_path = os.path.join(soil_dir, soil_file_name)
+                df_pcse["day"] = pd.to_datetime(df_pcse["day"])
+                merged_df = pd.merge(df_hourly, df_pcse, left_on="_merge_key", right_on="day", how="left")
+                merged_df.drop(columns=["day", "_merge_key"], errors="ignore", inplace=True)
 
-                    hourly_csv_path = os.path.join(hourly_weather_dir, str(year), f"{location_id}_hourly.csv")
-                    daily_csv_path = os.path.join(daily_weather_dir, str(year), f"{location_id}.csv")
+                merged_df["latitude"]     = location["latitude"]
+                merged_df["longitude"]    = location["longitude"]
+                merged_df["elevation"]    = location["elevation"]
+                merged_df["WAV"]          = wav_fraction
+                merged_df["wav_scenario"] = wav_scenario
+                merged_df["crop_name"]    = crop_name
+                merged_df["variety_name"] = variety_name
+                merged_df["year"]         = year
+                merged_df["harvest_twso"] = harvest_twso
+                merged_df["sim_success"]  = int(harvest_twso > 0)
+                merged_df["TWSO"]         = merged_df["TWSO"].fillna(0)
 
-                    # Check for missing files — do this before the WAV loop
-                    if not all(os.path.exists(p) for p in [soil_path, daily_csv_path, hourly_csv_path]):
-                        for _ in WAV_SCENARIOS:
-                            processed_counter += 1
-                            pbar.update(1)
-                        error_records.append({
-                            "year": year, "location_id": location_id,
-                            "latitude": location["latitude"], "longitude": location["longitude"],
-                            "crop": crop_name, "variety": variety_name,
-                            "error": "missing_input_file"
-                        })
-                        if processed_counter % 50 == 0:
-                            pd.DataFrame(progress_records).to_csv(progress_file, index=False)
-                            pd.DataFrame(error_records).to_csv(errors_file, index=False)
-                        continue
+                all_merged_data.append(merged_df)
+                progress_records.append({
+                    "year": year, "location_id": location_id,
+                    "latitude": location["latitude"], "longitude": location["longitude"],
+                    "crop": crop_name, "variety": variety_name,
+                    "wav_scenario": wav_scenario, "wav_fraction": wav_fraction,
+                    "status": "ok"
+                })
 
-                    # Soil and weather data — load once per location
-                    soild = CABOFileReader(soil_path)
-                    if "RDMSOL" not in soild:
-                        soild["RDMSOL"] = 150.0
-
-                    try:
-                        wdp = _make_daily_wdp(location_id, year, crop_end_year)
-                    except Exception as e:
-                        for _ in WAV_SCENARIOS:
-                            processed_counter += 1
-                            pbar.update(1)
-                        error_records.append({
-                            "year": year, "location_id": location_id,
-                            "latitude": location["latitude"], "longitude": location["longitude"],
-                            "crop": crop_name, "variety": variety_name,
-                            "error": str(e)
-                        })
-                        if processed_counter % 50 == 0:
-                            pd.DataFrame(progress_records).to_csv(progress_file, index=False)
-                            pd.DataFrame(error_records).to_csv(errors_file, index=False)
-                        continue
-
-                    df_hourly = pd.read_csv(hourly_csv_path)
-                    time_column = "DATETIME"
-                    if time_column not in df_hourly.columns:
-                        for _ in WAV_SCENARIOS:
-                            processed_counter += 1
-                            pbar.update(1)
-                        error_records.append({
-                            "year": year, "location_id": location_id,
-                            "latitude": location["latitude"], "longitude": location["longitude"],
-                            "crop": crop_name, "variety": variety_name,
-                            "error": f"{time_column}_missing"
-                        })
-                        if processed_counter % 50 == 0:
-                            pd.DataFrame(progress_records).to_csv(progress_file, index=False)
-                            pd.DataFrame(error_records).to_csv(errors_file, index=False)
-                        continue
-
-                    df_hourly[time_column] = pd.to_datetime(df_hourly[time_column]).dt.tz_localize(None)
-                    df_hourly["_merge_key"] = df_hourly[time_column].dt.normalize()
-
-                    # WAV scenarios — soil/weather data is shared, only the site changes
-                    for wav_scenario, wav_fraction in WAV_SCENARIOS.items():
-                        processed_counter += 1
-                        status = "ok"
-
-                        sited = WOFOST72SiteDataProvider(WAV=wav_fraction)
-
-                        params = ParameterProvider(cropdata=cropd, soildata=soild, sitedata=sited)
-                        try:
-                            wofost = Wofost72_WLP_CWB(params, wdp, agromanagement)
-                            wofost.run_till_terminate()
-                        except Exception as e:
-                            status = "simulation_error"
-                            error_records.append({
-                                "year": year, "location_id": location_id,
-                                "latitude": location["latitude"], "longitude": location["longitude"],
-                                "crop": crop_name, "variety": variety_name,
-                                "wav_scenario": wav_scenario, "wav_fraction": wav_fraction,
-                                "error": str(e)
-                            })
-                            pbar.update(1)
-                            if processed_counter % 50 == 0:
-                                pd.DataFrame(progress_records).to_csv(progress_file, index=False)
-                                pd.DataFrame(error_records).to_csv(errors_file, index=False)
-                            continue
-
-                        output = wofost.get_output()
-                        df_pcse = pd.DataFrame(output)
-                        if df_pcse.empty:
-                            status = "empty_simulation"
-                            error_records.append({
-                                "year": year, "location_id": location_id,
-                                "latitude": location["latitude"], "longitude": location["longitude"],
-                                "crop": crop_name, "variety": variety_name,
-                                "wav_scenario": wav_scenario, "wav_fraction": wav_fraction,
-                                "error": "empty_simulation_output"
-                            })
-                            pbar.update(1)
-                            if processed_counter % 50 == 0:
-                                pd.DataFrame(progress_records).to_csv(progress_file, index=False)
-                                pd.DataFrame(error_records).to_csv(errors_file, index=False)
-                            continue
-
-                        # Harvest yield: last TWSO value from WOFOST output (including winter crops)
-                        twso_series = df_pcse["TWSO"].dropna() if "TWSO" in df_pcse.columns else pd.Series([], dtype=float)
-                        harvest_twso = float(twso_series.iloc[-1]) if not twso_series.empty else 0.0
-
-                        df_pcse["day"] = pd.to_datetime(df_pcse["day"])
-                        merged_df = pd.merge(df_hourly, df_pcse, left_on="_merge_key", right_on="day", how="left")
-                        merged_df.drop(columns=["day", "_merge_key"], errors="ignore", inplace=True)
-
-                        merged_df["latitude"]     = location["latitude"]
-                        merged_df["longitude"]    = location["longitude"]
-                        merged_df["elevation"]    = location["elevation"]
-                        merged_df["WAV"]          = wav_fraction
-                        merged_df["wav_scenario"] = wav_scenario
-                        merged_df["crop_name"]    = crop_name
-                        merged_df["variety_name"] = variety_name
-                        merged_df["year"]         = year
-                        merged_df["harvest_twso"] = harvest_twso        # constant harvest yield across the season
-                        merged_df["sim_success"]  = int(harvest_twso > 0)
-                        merged_df["TWSO"]         = merged_df["TWSO"].fillna(0)  # daily growth state
-
-                        all_merged_data.append(merged_df)
-                        progress_records.append({
-                            "year": year, "location_id": location_id,
-                            "latitude": location["latitude"], "longitude": location["longitude"],
-                            "crop": crop_name, "variety": variety_name,
-                            "wav_scenario": wav_scenario, "wav_fraction": wav_fraction,
-                            "status": status
-                        })
-
-                        pbar.update(1)
-                        if processed_counter % 50 == 0:
-                            pd.DataFrame(progress_records).to_csv(progress_file, index=False)
-                            pd.DataFrame(error_records).to_csv(errors_file, index=False)
-
-            # 4. Yearly save
-            if all_merged_data:
-                yearly_dataset = pd.concat(all_merged_data, ignore_index=True)
-                yearly_file = os.path.join(yearly_output_dir, f"pcse_{year}.parquet")
-                yearly_dataset.to_parquet(yearly_file, index=False)
-                all_yearly_paths.append(yearly_file)
-                print(f"Yearly dataset created: {yearly_file}")
-            else:
-                print(f"Warning: no data to merge for {year}.")
-
-    # Final progress/error save
-    pd.DataFrame(progress_records).to_csv(progress_file, index=False)
-    pd.DataFrame(error_records).to_csv(errors_file, index=False)
-
-    # Clean up temp weather files
-    for tmp_path in _tmp_files:
+    # Cleanup temp files created by this process
+    for tmp_path in tmp_files:
         try:
             os.unlink(tmp_path)
         except Exception:
             pass
 
-    # 5. Final multi-year save
-    if all_yearly_paths:
-        frames = [pd.read_parquet(path) for path in all_yearly_paths]
-        final_dataset = pd.concat(frames, ignore_index=True)
-        final_output_file = os.path.join(dataset_output_dir, "final_hourly_pcse_dataset_multiyear.parquet")
-        final_dataset.to_parquet(final_output_file, index=False)
-        print(f"\nProcessing complete. '{final_output_file}' created.")
+    if all_merged_data:
+        pd.concat(all_merged_data, ignore_index=True).to_parquet(yearly_file, index=False)
+        print(f"[{year}] Done — {yearly_file}")
     else:
-        print("\nNo data could be merged for any year.")
+        print(f"[{year}] Warning: no data produced.")
+        yearly_file = None
+
+    if progress_records:
+        pd.DataFrame(progress_records).to_parquet(
+            os.path.join(dataset_output_dir, f"progress_{year}.parquet"), index=False)
+    if error_records:
+        pd.DataFrame(error_records).to_parquet(
+            os.path.join(dataset_output_dir, f"errors_{year}.parquet"), index=False)
+
+    return yearly_file
+
+
+if __name__ == "__main__":
+    years = list(range(2014, 2025))
+
+    valid_crop_variety_pairs = []
+    for crop_name, varieties in all_crops_varieties.items():
+        if not list(varieties):
+            print(f"Warning: no variety found for {crop_name}, skipping.")
+            continue
+        variety_name = choose_valid_variety(crop_name, varieties)
+        if variety_name is None:
+            print(f"Warning: no usable variety found for {crop_name}, skipping.")
+            continue
+        valid_crop_variety_pairs.append((crop_name, variety_name))
+
+    locations = build_locations()
+    total_combinations = len(years) * len(valid_crop_variety_pairs) * len(locations) * len(WAV_SCENARIOS)
+    print(f"Total combinations: {total_combinations}")
+    print(f"Running {len(years)} years across {PARALLEL_WORKERS} workers...")
+
+    args = [(y, locations, valid_crop_variety_pairs) for y in years]
+
+    with ProcessPoolExecutor(max_workers=PARALLEL_WORKERS) as executor:
+        results = list(executor.map(_simulate_year, args))
+
+    all_yearly_paths = [r for r in results if r is not None]
+
+    # Merge per-year progress/error files
+    progress_parts = [
+        pd.read_parquet(os.path.join(dataset_output_dir, f"progress_{y}.parquet"))
+        for y in years
+        if os.path.exists(os.path.join(dataset_output_dir, f"progress_{y}.parquet"))
+    ]
+    if progress_parts:
+        pd.concat(progress_parts, ignore_index=True).to_parquet(progress_file, index=False)
+
+    error_parts = [
+        pd.read_parquet(os.path.join(dataset_output_dir, f"errors_{y}.parquet"))
+        for y in years
+        if os.path.exists(os.path.join(dataset_output_dir, f"errors_{y}.parquet"))
+    ]
+    if error_parts:
+        pd.concat(error_parts, ignore_index=True).to_parquet(errors_file, index=False)
+
+    if all_yearly_paths:
+        print(f"\nSimulation complete. {len(all_yearly_paths)} yearly files saved to '{yearly_output_dir}'.")
+        print("Run scripts/merge_dataset.py to combine them into a single parquet file.")
+    else:
+        print("\nNo data could be produced for any year.")
