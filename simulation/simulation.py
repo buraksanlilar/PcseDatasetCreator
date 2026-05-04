@@ -56,7 +56,7 @@ GRID_LON_STEP = 1.5
 RANDOM_LOCATION_COUNT = 24
 RANDOM_SEED = 42
 
-PARALLEL_WORKERS = max(1, (os.cpu_count() or 1) - 1)
+PARALLEL_WORKERS = 4
 
 
 def is_land(lat: float, lon: float) -> bool:

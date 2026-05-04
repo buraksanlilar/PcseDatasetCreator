@@ -18,6 +18,7 @@ Daily API limit:
 
 import os
 import sys
+from datetime import date
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(script_dir, ".."))
@@ -39,11 +40,13 @@ def main():
     for i, year in enumerate(YEARS, 1):
         print(f"[{i}/{total}] Year {year}")
 
+        end_date = min(date(year, 12, 31), date.today()).strftime("%Y-%m-%d")
+
         print(f"  Fetching daily weather...")
-        fetch_and_save_pcse_weather(locations, f"{year}-01-01", f"{year}-12-31")
+        fetch_and_save_pcse_weather(locations, f"{year}-01-01", end_date)
 
         print(f"  Fetching hourly weather...")
-        fetch_hourly_sensor_data(locations, f"{year}-01-01", f"{year}-12-31")
+        fetch_hourly_sensor_data(locations, f"{year}-01-01", end_date)
 
         print(f"  Year {year} done.\n")
 
