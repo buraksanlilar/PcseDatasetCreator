@@ -2,6 +2,8 @@ pcseData/final_hourly_pcse_dataset_all_crops.csv
 *.csv
 *.cache.sqlite
 *.sqlite
+*.pkl
 # Local-only files
 CLAUDE.md
 memory/
+.DS_Store
