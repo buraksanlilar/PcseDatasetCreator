@@ -10,7 +10,8 @@ Usage:
 import os
 import sys
 import glob
-import pandas as pd
+import pyarrow.dataset as ds
+import pyarrow.parquet as pq
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
 project_root = os.path.abspath(os.path.join(script_dir, ".."))
@@ -26,17 +27,19 @@ if not files:
 
 print(f"Found {len(files)} yearly files. Merging...")
 
-frames = []
-for f in files:
-    year = os.path.basename(f).replace("pcse_", "").replace(".parquet", "")
-    print(f"  Loading {year}...")
-    frames.append(pd.read_parquet(f))
+dataset = ds.dataset(files, format="parquet")
+print("Writing merged file (streaming, low memory)...")
 
-print("Concatenating...")
-final = pd.concat(frames, ignore_index=True)
+writer = None
+total_rows = 0
+for batch in dataset.to_batches(batch_size=100_000):
+    if writer is None:
+        writer = pq.ParquetWriter(output_file, batch.schema)
+    writer.write_batch(batch)
+    total_rows += len(batch)
 
-print(f"Saving to '{output_file}'...")
-final.to_parquet(output_file, index=False)
+if writer:
+    writer.close()
 
 size_gb = os.path.getsize(output_file) / (1024 ** 3)
-print(f"Done. {len(final):,} rows — {size_gb:.2f} GB")
+print(f"Done. {total_rows:,} rows — {size_gb:.2f} GB")

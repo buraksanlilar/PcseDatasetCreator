@@ -91,13 +91,11 @@ Already-completed years are skipped automatically — safe to interrupt and resu
 
 ### Step 3 — Merge into a single dataset
 
-Run this on a machine with sufficient RAM (16 GB+ recommended for the full dataset):
-
 ```bash
 python scripts/merge_dataset.py
 ```
 
-Produces `output/final_hourly_pcse_dataset_multiyear.parquet` (~5–8 GB).
+Produces `output/final_hourly_pcse_dataset_multiyear.parquet` (~5 GB). The merge streams data in batches so RAM usage stays low regardless of dataset size.
 
 ## Configuration
 
@@ -127,9 +125,15 @@ import pandas as pd
 # Load a single year
 df = pd.read_parquet("output/yearly/pcse_2020.parquet")
 
-# Load all years lazily
-import glob
-df = pd.concat([pd.read_parquet(f) for f in sorted(glob.glob("output/yearly/*.parquet"))])
+# Load the full merged dataset
+df = pd.read_parquet("output/final_hourly_pcse_dataset_multiyear.parquet")
+
+# Or stream all years without loading everything into RAM
+import pyarrow.dataset as ds
+dataset = ds.dataset("output/yearly/", format="parquet")
+for batch in dataset.to_batches(batch_size=500_000):
+    df = batch.to_pandas()
+    # process df...
 ```
 
 ### Output columns
@@ -158,7 +162,7 @@ The dataset contains one row per hour per simulated season.
 | Scope | Rows | Parquet size |
 |---|---|---|
 | Single year | ~47M | ~400–600 MB |
-| Full dataset (11 years) | ~514M | ~5–8 GB |
+| Full dataset (11 years) | ~466M | ~5 GB |
 
 ## Possible ML tasks
 
@@ -212,7 +216,7 @@ SoilGrids allows roughly 5 requests/minute. The script includes a 13-second slee
 | OpenMeteo hourly limit | Wait one hour and re-run `fetch_weather.py` — completed files are preserved |
 | Simulation very slow | Reduce `PARALLEL_WORKERS` or narrow the `years` range |
 | Winter crop TWSO = 0 | Ensure next-year weather is available; `fetch_weather.py` fetches 2026 for this reason |
-| merge_dataset.py OOM | Run on a machine with 16 GB+ RAM, or process years individually |
+| merge_dataset.py crashes | Ensure `pyarrow` is installed (`pip install pyarrow`) |
 
 ## License
 
